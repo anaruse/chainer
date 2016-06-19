@@ -6,7 +6,6 @@ import numpy
 import six
 
 from cupy.core import flags
-from cupy import util
 
 cimport cpython
 cimport cython
@@ -14,7 +13,6 @@ from libcpp cimport vector
 
 from cupy.core cimport internal
 from cupy.cuda cimport cublas
-from cupy.cuda cimport device
 from cupy.cuda cimport memory
 
 
