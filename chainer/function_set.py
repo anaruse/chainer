@@ -22,6 +22,7 @@ class FunctionSet(link.Chain):
           been replaced by :class:`~chainer.Link` and :class:`~chainer.Chain`.
 
     """
+
     def __init__(self, **links):
         super(FunctionSet, self).__init__(**links)
         warnings.warn('FunctionSet is deprecated. Use Chain instead.',

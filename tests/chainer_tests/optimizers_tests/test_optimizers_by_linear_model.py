@@ -165,6 +165,7 @@ class TestMomentumSGD(OptimizerTestBase, unittest.TestCase):
     'dtype': [numpy.float16, numpy.float32, numpy.float64]
 }))
 class NesterovAG(OptimizerTestBase, unittest.TestCase):
+
     def create(self):
         return optimizers.NesterovAG(0.1)
 
