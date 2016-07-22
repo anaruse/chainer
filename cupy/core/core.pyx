@@ -87,7 +87,7 @@ cdef class ndarray:
         # print('[cupy/core/core.pyx: __init__()] useSwapMemory:{}'.format(useSwapMemory))
 
         if memptr is None:
-            self.data = memory.alloc(self.size * self.dtype.itemsize, useSwapMemory)
+            self.data = memory.alloc(self.size * self.dtype.itemsize, useSwapMemory=useSwapMemory)
         else:
             self.data = memptr
         self.base = None
@@ -1403,7 +1403,7 @@ cdef _argmax = create_reduction_func(
 # Array creation routines
 # -----------------------------------------------------------------------------
 
-cpdef ndarray array(obj, dtype=None, bint copy=True, Py_ssize_t ndmin=0, stream=None, useSwapMemory=False):
+cpdef ndarray array(obj, dtype=None, bint copy=True, Py_ssize_t ndmin=0, stream=None, bint useSwapMemory=False):
     # TODO(beam2d): Support order and subok options
     cdef Py_ssize_t nvidem
     cdef ndarray a

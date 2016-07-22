@@ -270,7 +270,7 @@ cdef class MemoryPointer:
 cpdef MemoryPointer _malloc(Py_ssize_t size, bint useSwapMemory=False):
     # anaruse: debug
     # print('[cupy/cuda/memory.pyx: MemoryPointer _malloc()] useSwapMemory:{}'.format(useSwapMemory))
-    mem = Memory(size, useSwapMemory)
+    mem = Memory(size, useSwapMemory=useSwapMemory)
     return MemoryPointer(mem, 0)
 
 
@@ -292,7 +292,7 @@ cpdef MemoryPointer alloc(Py_ssize_t size, bint useSwapMemory=False):
     """
     # anaruse: debug
     # print('[cupy/cuda/memory.pyx: alloc()]')
-    return _current_allocator(size, useSwapMemory)
+    return _current_allocator(size, useSwapMemory=useSwapMemory)
 
 
 cpdef set_allocator(allocator=_malloc):
@@ -378,12 +378,12 @@ cdef class SingleDeviceMemoryPool:
             mem = free.pop()
         else:
             try:
-                mem = self._alloc(size, useSwapMemory).mem
+                mem = self._alloc(size, useSwapMemory=useSwapMemory).mem
             except runtime.CUDARuntimeError as e:
                 if e.status != 2:
                     raise
                 self.free_all_free()
-                mem = self._alloc(size, useSwapMemory).mem
+                mem = self._alloc(size, useSwapMemory=useSwapMemory).mem
 
         self._in_use[mem.ptr] = mem
         pmem = PooledMemory(mem, self._weakref)
@@ -466,7 +466,7 @@ cdef class MemoryPool(object):
         # anaruse: debug
         # print('[cupy/cuda/memory.pyx: MemoryPointer malloc()] pools:{}, useSwapMemory:{}'
         #       .format(dev, useSwapMemory))
-        return self._pools[dev].malloc(size, useSwapMemory)
+        return self._pools[dev].malloc(size, useSwapMemory=useSwapMemory)
 
     cpdef free_all_free(self):
         """Release free blocks."""
