@@ -101,6 +101,10 @@ Actual: {0}'''.format(type(data))
 
         self.name = name
 
+        # anaruse
+        self.org_rank = self.rank
+        self.org_creator = self.creator
+
     def __reduce__(self):
         return Variable, (self.data, self.volatile, self.name)
 
@@ -292,6 +296,60 @@ Actual: {0}'''.format(type(data))
         """
         self.creator = gen_func
         self.rank = gen_func.rank + 1
+
+    # anaruse
+    def fores(self):
+        fore_funcs = []
+        fore_vars  = []
+        seen_funcs = set()
+        seen_vars  = set()
+
+        def add_cand(fores, seen, cand):
+            if cand is not None and cand not in seen:
+                fores.append(cand)
+                seen.add(cand)
+
+        add_cand(fore_funcs, seen_funcs, self.org_creator)
+        add_cand(fore_funcs, seen_funcs, self.creator)
+
+        while fore_funcs:
+            func = fore_funcs.pop()
+            for var in func.inputs:
+                add_cand(fore_vars,  seen_vars,  var)
+                add_cand(fore_funcs, seen_funcs, var.creator)
+
+        # anaruse: debug
+        # print('[chainer/variable.py, fores()] self:{}'.format(self))
+        # for var in fore_vars:
+        #     print('[chainer/variable.py, fores()] fore:{}'.format(var))
+
+        return fore_vars
+
+    # anaruse
+    def fores_to_gpu(self, device=None, stream=None):
+        fore_vars = self.fores()
+        while fore_vars:
+            var = fore_vars.pop()
+            var.to_gpu(device=device, stream=stream)
+
+    # anaruse
+    def fores_to_swap(self, stream=None):
+        fore_vars = self.fores()
+        while fore_vars:
+            var = fore_vars.pop()
+            var.to_swap(stream=stream)
+
+    # anaruse
+    def interrupt_backward(self):
+        self.org_creator = self.creator
+        self.org_rank = self.rank
+        self.creator = None
+        self.rank = 0
+
+    # anaruse
+    def resume_backward(self):
+        self.creator = self.org_creator
+        self.rank = self.org_rank
 
     def backward(self, retain_grad=False):
         """Runs error backpropagation (a.k.a. backprop) from this variable.
