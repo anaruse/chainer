@@ -95,6 +95,8 @@ class Stream(object):
     Attributes:
         ptr (cupy.cuda.runtime.Stream): Raw stream handle. It can be passed to
             the CUDA Runtime API via ctypes.
+        async_src_list (list): List of ponter to src data that is copied asynchronously.
+            This list is to prevent GC from freeing src memory before copy completes.
 
     """
     def __init__(self, null=False, non_blocking=False):
@@ -104,6 +106,7 @@ class Stream(object):
             self.ptr = runtime.streamCreateWithFlags(runtime.streamNonBlocking)
         else:
             self.ptr = runtime.streamCreate()
+        self.async_src_list = []
 
     def __del__(self):
         if self.ptr:
@@ -117,6 +120,10 @@ class Stream(object):
     def synchronize(self):
         """Waits for the stream completing all queued work."""
         runtime.streamSynchronize(self.ptr)
+        # anaruse
+        while self.async_src_list:
+            data = self.async_src_list.pop()
+            print('[cupy/cuda/stream.py, synchronize()] data:{}'.format(data))
 
     def add_callback(self, callback, arg):
         """Adds a callback that is called when all queued work is done.

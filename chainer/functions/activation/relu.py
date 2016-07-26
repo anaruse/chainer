@@ -46,6 +46,7 @@ class ReLU(function.Function):
         if (cuda.cudnn_enabled and self.use_cudnn and
                 (_cudnn_version >= 3000 or x[0].dtype != numpy.float16)):
             gx = cudnn.activation_backward(x[0], self.y, gy[0], _mode)
+            self.y = None  # anaruse: remove reference to self.y
         else:
             gx = cuda.elementwise(
                 'T x, T gy', 'T gx',

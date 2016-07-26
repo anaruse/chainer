@@ -1235,7 +1235,18 @@ cdef class ndarray:
         else:
             self._update_f_contiguity()
 
-
+    # anaruse
+    cpdef ndarray takeover(self, ndarray src):
+        print('[cupy/core/core.pyx: takeover()]')
+        self.size          = src.size
+        self.dtype         = src.dtype
+        self._shape        = src._shape
+        self._strides      = src._strides
+        self.data          = src.data
+        self.base          = src.base
+        self._c_contiguous = src._c_contiguous
+        self._f_contiguous = src._f_contiguous
+        return self
 
 cdef object newaxis = numpy.newaxis  # == None
 

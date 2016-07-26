@@ -91,7 +91,9 @@ class Link(object):
     def __init__(self, **params):
         self._params = []
         self._persistent = []
-        self._cpu = True
+        self._cpu  = True
+        self._gpu  = False
+        self._swap = False
         self.name = None
 
         for name, shape in six.iteritems(params):
@@ -199,10 +201,12 @@ class Link(object):
             value = d[name]
             if isinstance(value, cuda.ndarray):
                 d[name] = value.get()
-        self._cpu = True
+        self._cpu  = True
+        self._gpu  = False
+        self._swap = False
         return self
 
-    def to_gpu(self, device=None):
+    def to_gpu(self, device=None, stream=None):
         """Copies parameter variables and persistent values to GPU.
 
         This method does not handle non-registered attributes. If some of such
@@ -217,17 +221,52 @@ class Link(object):
 
         """
         cuda.check_cuda_available()
-        if not self._cpu:
+        if self._gpu:
             return self
         d = self.__dict__
         with cuda.get_device(device):
             for name in self._params:
-                d[name].to_gpu()
+                d[name].to_gpu(stream=stream)
             for name in self._persistent:
+                # anaruse: need to change?
                 value = d[name]
                 if isinstance(value, numpy.ndarray):
-                    d[name] = cuda.to_gpu(value)
-        self._cpu = False
+                    d[name] = cuda.to_gpu(value, stream=stream)
+        self._cpu  = False
+        self._gpu  = True
+        self._swap = False
+        return self
+
+    # anaruse
+    def to_swap(self, device=None, stream=None):
+        """Copies parameter variables and persistent values to SWAP.
+
+        This method does not handle non-registered attributes. If some of such
+        attributes must be copied to GPU, the link implementation must
+        override this method to do so.
+
+        Args:
+            device: Target device specifier. If omitted, the current device is
+                used.
+
+        Returns: self
+
+        """
+        cuda.check_cuda_available()
+        if self._swap:
+            return self
+        d = self.__dict__
+        with cuda.get_device(device):
+            for name in self._params:
+                d[name].to_swap(stream=stream)
+            for name in self._persistent:
+                # anaruse: need to change?
+                value = d[name]
+                if isinstance(value, numpy.ndarray):
+                    d[name] = cuda.to_swap(value, stream=stream)
+        self._cpu  = False
+        self._gpu  = False
+        self._swap = True
         return self
 
     def params(self):
@@ -316,6 +355,12 @@ class Link(object):
         """
         for param in self.params():
             param.zerograd()
+
+    def freegrads(self):
+        """ free gradient array
+        """
+        for param in self.params():
+            param.freegrad()
 
     def addgrads(self, link):
         """Accumulates gradient values from given link.
@@ -470,12 +515,21 @@ class Chain(Link):
             d[name].to_cpu()
         return self
 
-    def to_gpu(self, device=None):
+    def to_gpu(self, device=None, stream=None):
         with cuda.get_device(device):
-            super(Chain, self).to_gpu()
+            super(Chain, self).to_gpu(stream=stream)
             d = self.__dict__
             for name in self._children:
-                d[name].to_gpu()
+                d[name].to_gpu(stream=stream)
+        return self
+
+    # anaruse
+    def to_swap(self, device=None, stream=None):
+        with cuda.get_device(device):
+            super(Chain, self).to_swap(stream=stream)
+            d = self.__dict__
+            for name in self._children:
+                d[name].to_swap(stream=stream)
         return self
 
     def params(self):
@@ -531,6 +585,12 @@ class Chain(Link):
         d = self.__dict__
         for name in self._children:
             d[name].zerograds()
+
+    def freegrads(self):
+        super(Chain, self).freegrads()
+        d = self.__dict__
+        for name in self._children:
+            d[name].freegrads()
 
     def addgrads(self, link):
         super(Chain, self).addgrads(link)
@@ -629,11 +689,19 @@ class ChainList(Link):
             link.to_cpu()
         return self
 
-    def to_gpu(self, device=None):
+    def to_gpu(self, device=None, stream=None):
         with cuda.get_device(device):
-            super(ChainList, self).to_gpu()
+            super(ChainList, self).to_gpu(stream=stream)
             for link in self._children:
-                link.to_gpu()
+                link.to_gpu(stream=stream)
+        return self
+
+    # anaruse
+    def to_swap(self, device=None, stream=None):
+        with cuda.get_device(device):
+            super(ChainList, self).to_swap(stream=stream)
+            for link in self._children:
+                link.to_swap(stream=stream)
         return self
 
     def params(self):
@@ -680,6 +748,11 @@ class ChainList(Link):
         super(ChainList, self).zerograds()
         for child in self._children:
             child.zerograds()
+
+    def freegrads(self):
+        super(ChainList, self).freegrads()
+        for child in self._children:
+            child.freegrads()
 
     def addgrads(self, link):
         super(ChainList, self).addgrads(link)

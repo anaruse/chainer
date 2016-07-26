@@ -195,7 +195,9 @@ def to_gpu(array, device=None, stream=None):
     with get_device(device):
         if isinstance(array, ndarray) and array.data.mem._swap is True:
             # anaruse: move data from SWAP to GPU
-            return cupy.array(array, copy=True, stream=stream)
+            a = cupy.array(array, copy=True, stream=stream)
+            array.takeover(a)
+            return array
 
         array_dev = get_device(array)
         if array_dev.id == cupy.cuda.device.get_device_id():
@@ -268,7 +270,8 @@ def to_swap(array, stream=None):
         dev_id = int(get_device(array))
         if dev_id != -1 and array.data.mem._swap is False:
             a = cupy.array(array, copy=True, stream=stream, useSwapMemory=True)
-            return a
+            array.takeover(a)
+            return array
         else:
             return cupy.asarray(array)
     elif isinstance(array, numpy.ndarray):

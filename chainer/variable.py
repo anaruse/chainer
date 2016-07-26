@@ -102,8 +102,8 @@ Actual: {0}'''.format(type(data))
         self.name = name
 
         # anaruse
-        self.org_rank = self.rank
-        self.org_creator = self.creator
+        # self.org_rank = self.rank
+        # self.org_creator = self.creator
 
     def __reduce__(self):
         return Variable, (self.data, self.volatile, self.name)
@@ -197,7 +197,7 @@ Actual: {0}'''.format(type(data))
     def to_cpu(self):
         """Copies the data and gradient arrays to CPU."""
         # anaruse: debug
-        # print('[chainer/variable.py, to_cpu()] var:{}'.format(self))
+        print('[chainer/variable.py, to_cpu()] var:{}'.format(self))
         self.data = cuda.to_cpu(self.data)
         if self._grad is not None:
             self._grad = cuda.to_cpu(self._grad)
@@ -211,7 +211,7 @@ Actual: {0}'''.format(type(data))
 
         """
         # anaruse: debug
-        # print('[chainer/variable.py, to_gpu()] var:{}'.format(self))
+        print('[chainer/variable.py, to_gpu()] var:{}'.format(self))
         with cuda.get_device(device):
             self.data = cuda.to_gpu(self.data, stream=stream)
             if self._grad is not None:
@@ -220,7 +220,7 @@ Actual: {0}'''.format(type(data))
     def to_swap(self, stream=None):
         """Move the data and gradient arrays on GPU/CPU to SWAP memory."""
         # anaruse: debug
-        # print('[chainer/variable.py, to_swap()] var:{}, stream:{}'.format(self, stream))
+        print('[chainer/variable.py, to_swap()] var:{}, stream:{}'.format(self, stream))
         self.data = cuda.to_swap(self.data, stream=stream)
         if self._grad is not None:
             self._grad = cuda.to_swap(self._grad, stream=stream)
@@ -233,6 +233,13 @@ Actual: {0}'''.format(type(data))
                 self._grad = xp.zeros_like(self.data)
             else:
                 self._grad.fill(0)
+
+    # anaruse
+    def freegrad(self):
+        """ free gradient memory """
+        with cuda.get_device(self.data) as dev:
+            if self._grad is not None:
+                self._grad = None
 
     def copydata(self, var):
         """Copies the data array from given source variable.
@@ -350,6 +357,8 @@ Actual: {0}'''.format(type(data))
     def resume_backward(self):
         self.creator = self.org_creator
         self.rank = self.org_rank
+        self.org_creator = None
+        self.org_rank = 0
 
     def backward(self, retain_grad=False):
         """Runs error backpropagation (a.k.a. backprop) from this variable.
@@ -483,12 +492,16 @@ Actual: {0}'''.format(type(data))
                 cand_funcs.append(cand)
                 seen_set.add(cand)
 
+        # anaruse: debug
+        print('[chainer/variable.py: unchain_backward()] self:{}'.format(self))
         add_cand(self.creator)
 
         while cand_funcs:
             func = cand_funcs.pop()
             for var in func.inputs:
                 add_cand(var.creator)
+                # anaruse: debug
+                print('[chainer/variable.py: unchain_backward()] var:{}'.format(var))
             func.unchain()
 
     def __lt__(self, other):

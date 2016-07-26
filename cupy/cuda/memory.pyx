@@ -154,6 +154,8 @@ cdef class MemoryPointer:
             _set_peer_access(src.device.id, self.device.id)
             runtime.memcpyAsync(self.ptr, src.ptr, size,
                                 runtime.memcpyDefault, stream.ptr)
+            # anaruse: prevent GC from freeing src memory before memcpy finish
+            stream.async_src_list.append(src)
 
     cpdef copy_from_host(self, mem, size_t size):
         """Copies a memory sequence from the host memory.
@@ -179,6 +181,8 @@ cdef class MemoryPointer:
         if size > 0:
             runtime.memcpyAsync(self.ptr, mem.value, size,
                                 runtime.memcpyHostToDevice, stream.ptr)
+            # anaruse: prevent GC from freeing src memory before memcpy finish
+            stream.async_src_list.append(mem)
 
     cpdef copy_from(self, mem, size_t size):
         """Copies a memory sequence from a (possibly different) device or host.
@@ -242,6 +246,8 @@ cdef class MemoryPointer:
         if size > 0:
             runtime.memcpyAsync(mem.value, self.ptr, size,
                                 runtime.memcpyDeviceToHost, stream)
+            # anaruse: prevent GC from freeing src memory before memcpy finish
+            stream.async_src_list.append(self)
 
     cpdef memset(self, int value, size_t size):
         """Fills a memory sequence by constant byte value.
@@ -385,6 +391,9 @@ cdef class SingleDeviceMemoryPool:
                 self.free_all_free()
                 mem = self._alloc(size, useSwapMemory=useSwapMemory).mem
 
+        # anaruse: debug
+        print('[cupy/cuda/memory.pyx: SingleDeviceMemoryPool: malloc()] size:{}, ptr:{}, _swap:{}'
+              .format(mem.size, mem.ptr, mem._swap))
         self._in_use[mem.ptr] = mem
         pmem = PooledMemory(mem, self._weakref)
         return MemoryPointer(pmem, 0)
@@ -396,8 +405,8 @@ cdef class SingleDeviceMemoryPool:
         if mem is None:
             raise RuntimeError('Cannot free out-of-pool memory')
         # anaruse: debug
-        # print('[cupy/cuda/memory.pyx: SingleDeviceMemoryPool: free()] size:{}, ptr:{}, _swap:{}'
-        #       .format(mem.size, mem.ptr, mem._swap))
+        print('[cupy/cuda/memory.pyx: SingleDeviceMemoryPool: free()] size:{}, ptr:{}, _swap:{}'
+              .format(mem.size, mem.ptr, mem._swap))
         free = self._free[size]
         free.append(mem)
 

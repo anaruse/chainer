@@ -147,6 +147,7 @@ class SoftmaxCrossEntropy(function.Function):
             gx = gx.reshape(y.shape)
 
         gx *= gloss * self._coeff
+        self.y = None  # anaruse: remove reference to self.y
         return gx, None
 
     def backward_gpu(self, inputs, grad_outputs):
@@ -169,6 +170,7 @@ class SoftmaxCrossEntropy(function.Function):
             ''',
             'softmax_crossent_bwd')(
                 y, cupy.expand_dims(t, 1), coeff, x.shape[1], n_unit)
+        self.y = None  # anaruse: remove reference to self.y
         return gx, None
 
 
