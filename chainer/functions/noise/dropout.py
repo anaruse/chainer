@@ -29,7 +29,10 @@ class Dropout(function.Function):
         return x[0] * self.mask,
 
     def backward(self, x, gy):
-        return gy[0] * self.mask,
+        # return gy[0] * self.mask,
+        ret = gy[0] * self.mask,
+        self.mask = None
+        return ret
 
 
 def dropout(x, ratio=.5, train=True):

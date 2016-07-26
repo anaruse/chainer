@@ -359,7 +359,8 @@ cdef class SingleDeviceMemoryPool:
         self._free = collections.defaultdict(list)
         self._alloc = allocator
         self._weakref = weakref.ref(self)
-        self._allocation_unit_size = 256
+        # self._allocation_unit_size = 256
+        self._allocation_unit_size = 1024
 
     cpdef MemoryPointer malloc(self, Py_ssize_t size, bint useSwapMemory=False):
         cdef list free
@@ -371,18 +372,51 @@ cdef class SingleDeviceMemoryPool:
         # Round up the memory size to fit memory alignment of cudaMalloc
         unit = self._allocation_unit_size
         # size = (((size + unit - 1) // unit) * unit)
-        # anaruse: debug
-        # print('[cupy/cuda/memory.pyx: malloc()] org_size:{}'.format(size))
-        tmp_size = unit
-        while tmp_size < size:
-            tmp_size *= 2
-        size = tmp_size
-        # anaruse: debug
-        # print('[cupy/cuda/memory.pyx: malloc()] rup_size:{}'.format(size))
-        free = self._free[size]
-        if free:
-            mem = free.pop()
-        else:
+
+        org_size = size
+        thr_size = size
+        if thr_size < unit:
+            thr_size = unit
+        rup_size = unit
+        while rup_size < thr_size:
+            rup_size *= 2
+
+        size_list = []
+        size = rup_size - rup_size/8 * 3
+        if size >= org_size and size < thr_size*2:
+            size_list.append(size)
+        size = rup_size - rup_size/8 * 2
+        if size >= org_size and size < thr_size*2:
+            size_list.append(size)
+        size = rup_size - rup_size/8
+        if size >= org_size and size < thr_size*2:
+            size_list.append(size)
+        size = rup_size
+        if size >= org_size and size < thr_size*2:
+            size_list.append(size)
+        size = rup_size + rup_size/4
+        if size >= org_size and size < thr_size*2:
+            size_list.append(size)
+        size = rup_size + rup_size/4 * 2
+        if size >= org_size and size < thr_size*2:
+            size_list.append(size)
+        size = rup_size + rup_size/4 * 3
+        if size >= org_size and size < thr_size*2:
+            size_list.append(size)
+
+        #print('[cupy/cuda/memory.pyx] org_size:{}, size_list:{}'.format(org_size, size_list))
+
+        mem = None
+        for i in range(0, len(size_list)):
+            if mem is not None:
+                break
+            size = size_list[i]
+            free = self._free[size]
+            if free:
+                mem = free.pop()
+        
+        if mem is None:
+            size = size_list[0]
             try:
                 mem = self._alloc(size, useSwapMemory=useSwapMemory).mem
             except runtime.CUDARuntimeError as e:
@@ -390,6 +424,10 @@ cdef class SingleDeviceMemoryPool:
                     raise
                 self.free_all_free()
                 mem = self._alloc(size, useSwapMemory=useSwapMemory).mem
+
+        if size != size_list[0]:
+            print('[cupy/cuda/memory.pyx] org_size:{}, size:{}, size_list:{}'
+                  .format(org_size, size, size_list))
 
         # anaruse: debug
         print('[cupy/cuda/memory.pyx: SingleDeviceMemoryPool: malloc()] size:{}, ptr:{}, _swap:{}'
