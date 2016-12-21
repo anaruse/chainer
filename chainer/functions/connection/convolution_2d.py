@@ -6,6 +6,8 @@ from chainer import function
 from chainer.utils import conv
 from chainer.utils import type_check
 
+from chainer.functions.util import fused_function
+
 if cuda.cudnn_enabled:
     cudnn = cuda.cudnn
     libcudnn = cuda.cudnn.cudnn
@@ -264,7 +266,8 @@ class Convolution2DFunction(function.Function):
 
 
 def convolution_2d(x, W, b=None, stride=1, pad=0, use_cudnn=True,
-                   cover_all=False, deterministic=False):
+                   cover_all=False, deterministic=False,
+                   pre_func=None):
     """Two-dimensional convolution function.
 
     This is an implementation of two-dimensional convolution in ConvNets.
@@ -331,6 +334,12 @@ def convolution_2d(x, W, b=None, stride=1, pad=0, use_cudnn=True,
     """
     func = Convolution2DFunction(
         stride, pad, use_cudnn, cover_all, deterministic)
+
+    if pre_func is not None:
+        print("[functions/convolution_2d.py:339]")
+        print("    pre_func:{}".format(pre_func))
+        func = fused_function.FusedFunction(pre_func, func)
+
     if b is None:
         return func(x, W)
     else:
