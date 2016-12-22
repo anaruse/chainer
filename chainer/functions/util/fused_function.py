@@ -4,30 +4,50 @@ import sys
 
 class FusedFunction(function.Function):
 
-    def __init__(self, f1, f2):
-        self.f1 = f1
-        self.f2 = f2
+    def __init__(self, *funcs):
+        print("[fused_function.py, __init__()]")
+        print("    funcs: type:{}, len:{}".format(type(funcs),len(funcs)))
+
+        n_funcs = len(funcs)
+
+        self.pre_funcs = funcs[:n_funcs-1]  # tuple of function object
+        self.core_func = funcs[n_funcs-1]   # function object
+
+        print("    pre_funcs: type:{}, len:{}".format(type(self.pre_funcs),len(self.pre_funcs)))
 
     def forward(self, inputs):
         # inputs: tuple of ndarray
         print("[fused_function.py, forward()]")
         print("    inputs: type:{}, len:{}".format(type(inputs),len(inputs)))
+        # print("    inputs[0]: type:{}, size:{}".format(type(inputs[0]),inputs[0].size))
 
-        f1_inputs = tuple([inputs[0]])
+        n_pre_funcs = len(self.pre_funcs)
 
-        hs = self.f1.forward(f1_inputs)
+        hs = tuple([inputs[0]])
+        # print("    hs: type:{}, len:{}".format(type(hs),len(hs)))
+        # print("    hs[0]: type:{}, size:{}".format(type(hs[0]),hs[0].size))
+        for i in range(n_pre_funcs):
+            pre_func = self.pre_funcs[i]
+            print("    pre_funcs[{}]:{}".format(i,pre_func))
+            hs = pre_func.forward(hs)
+            # print("    hs: type:{}, len:{}".format(type(hs),len(hs)))
+            # print("    hs[0]: type:{}, size:{}".format(type(hs[0]),hs[0].size))
 
-        f2_inputs = [hs[0]]
+            # work-around for ReLU
+            if hasattr(pre_func, 'y'):
+                pre_func.y = None
+            
+        core_inputs = [hs[0]]
         for i in inputs[1:]:
-            f2_inputs.append(i)
-        f2_inputs = tuple(f2_inputs)
+            core_inputs.append(i)
+        core_inputs = tuple(core_inputs)
+        # print("    core_inputs: type:{}, len:{}".format(type(core_inputs),len(core_inputs)))
 
-        outputs = self.f2.forward(f2_inputs)
+        print("    core_func:{}".format(self.core_func))
+        outputs = self.core_func.forward(core_inputs)
         print("    outputs: type:{}, len:{}".format(type(outputs),len(outputs)))
+        # print("    outputs[0]: type:{}, size:{}".format(type(outputs[0]),outputs[0].size))
 
-        # work-around for ReLU
-        if hasattr(self.f1, 'y'):
-            self.f1.y = None
         return outputs
 
     def backward(self, inputs, g_outputs):
@@ -37,35 +57,44 @@ class FusedFunction(function.Function):
         print("    inputs: type:{}, len:{}".format(type(inputs),len(inputs)))
         print("    g_outputs: type:{}, len:{}".format(type(g_outputs),len(g_outputs)))
 
-        f1_inputs = tuple([inputs[0]])
-        # print("    f1_inputs: type:{}, len:{}".format(type(f1_inputs),len(f1_inputs)))
 
-        f1_outputs = self.f1.forward(f1_inputs)
-        # print("    f1_outputs: type:{}, len:{}".format(type(f1_outputs),len(f1_outputs)))
+        n_pre_funcs = len(self.pre_funcs)
+        hs_list = []
 
-        f2_inputs = [f1_outputs[0]]
+        hs = tuple([inputs[0]])
+        hs_list.append(hs)
+        for i in range(n_pre_funcs):
+            pre_func = self.pre_funcs[i]
+            print("    pre_funcs[{}]:{}".format(i,pre_func))
+            hs = pre_func.forward(hs)
+            hs_list.append(hs)
+            # print("    hs: type:{}, len:{}".format(type(hs),len(hs)))
+            # print("    hs[0]: type:{}, size:{}".format(type(hs[0]),hs[0].size))
+
+        hs = hs_list.pop()
+        core_inputs = [hs[0]]
         for i in inputs[1:]:
-            f2_inputs.append(i)
-        f2_inputs = tuple(f2_inputs)
-        # print("    f2_inputs: type:{}, len:{}".format(type(f2_inputs),len(f2_inputs)))
+            core_inputs.append(i)
+        core_inputs = tuple(core_inputs)
+        # print("    core_inputs: type:{}, len:{}".format(type(core_inputs),len(core_inputs)))
 
-        g_f2_outputs = g_outputs
-        g_f2_inputs = self.f2.backward(f2_inputs, g_f2_outputs)
-        # print("    g_f2_inputs: type:{}, len:{}".format(type(g_f2_inputs),len(g_f2_inputs)))
+        print("    core_func:{}".format(self.core_func))
+        g_core_inputs = self.core_func.backward(core_inputs, g_outputs)
 
-        g_f1_outputs = tuple([g_f2_inputs[0]])
-        # print("    g_f1_outputs: type:{}, len:{}".format(type(g_f1_outputs),len(g_f1_outputs)))
+        g_hs = tuple([g_core_inputs[0]])
+        for i in reversed(range(n_pre_funcs)):
+            pre_func = self.pre_funcs[i]
+            print("    pre_funcs[{}]:{}".format(i,pre_func))
+            hs = hs_list.pop()
+            g_hs = pre_func.backward(hs, g_hs)
 
-        g_f1_inputs = self.f1.backward(f1_inputs, g_f1_outputs)
-        # print("    g_f1_inputs: type:{}, len:{}".format(type(g_f1_inputs),len(g_f1_inputs)))
-
-        g_inputs = [g_f1_inputs[0]]
-        for i in g_f2_inputs[1:]:
+        g_inputs = [g_hs[0]]
+        for i in g_core_inputs[1:]:
             g_inputs.append(i)
         g_inputs = tuple(g_inputs)
         print("    g_inputs: type:{}, len:{}".format(type(g_inputs),len(g_inputs)))
 
-        self.f1 = None
-        self.f2 = None
+        self.pre_funcs = None
+        self.core_func = None
 
         return g_inputs
