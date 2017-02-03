@@ -530,7 +530,7 @@ Actual: {0}'''.format(type(data))
                 _, _, func = heapq.heappop(cand_funcs)
                 outputs = tuple(y() for y in func.outputs)
                 for y in outputs:
-                    if y.forgot is True:
+                    if hasattr(y, "forgot") and y.forgot is True:
                         if func not in seen_recomp_funcs:
                             heapq.heappush(cand_recomp_funcs,
                                            (func.rank, len(seen_recomp_funcs),
