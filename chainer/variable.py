@@ -276,7 +276,7 @@ Actual: {0}'''.format(type(data))
         self._can_swapout = True
 
     # OOC
-    def set_end_of_sub_graph(self, stream=None):
+    def set_end_of_sub_graph(self, stream=None, do_swap=True):
         """Set this variable as an end of a sub graph"""
         self._is_end_of_sub_graph = True
         self._stream = stream
@@ -287,7 +287,8 @@ Actual: {0}'''.format(type(data))
         if self._stream is not None:
             runtime.deviceSynchronize()
             # self._stream.synchronize()
-        self.ancestors_to_swap(stream=self._stream)
+        if do_swap:
+            self.ancestors_to_swap(stream=self._stream)
 
     def cleargrad(self):
         """Clears the gradient array."""
