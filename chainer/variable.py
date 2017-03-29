@@ -15,6 +15,7 @@ import cupy.cuda.runtime as runtime  # temporal
 
 # import cupy.testing as testing  # temporal
 
+_debug = True
 
 def _check_grad_type(func, x, gx):
     def make_message(message):
@@ -52,6 +53,12 @@ https://github.com/pfnet/chainer/issues/new.
         msg = ('Shape of data and grad mismatch\n%s != %s' %
                (x.data.shape, gx.shape))
         raise ValueError(make_message(msg))
+
+
+def _add_instance(instances, seen_set, instance):
+    if instance is not None and instance not in seen_set:
+        instances.append(instance)
+        seen_set.add(instance)
 
 
 class Variable(object):
@@ -106,8 +113,7 @@ Actual: {0}'''.format(type(data))
         self._grad = grad
         self.creator = None
 
-        self._org_creator = None
-        self._org_rank = 0
+        self.g_creator = None
         self._can_swapout = True
 
         # OOC
@@ -381,6 +387,7 @@ Actual: {0}'''.format(type(data))
         """
         self.creator = gen_func
         self.rank = gen_func.rank + 1
+        self.g_creator = self.creator
 
     def ancestors(self):
         """Gets a list of my ancestor variables."""
@@ -394,8 +401,7 @@ Actual: {0}'''.format(type(data))
                 ancestors.append(cand)
                 seen.add(cand)
 
-        add_cand(ancestor_funcs, seen_funcs, self._org_creator)
-        add_cand(ancestor_funcs, seen_funcs, self.creator)
+        add_cand(ancestor_funcs, seen_funcs, self.g_creator)
 
         while ancestor_funcs:
             func = ancestor_funcs.pop()
@@ -419,17 +425,38 @@ Actual: {0}'''.format(type(data))
 
     def interrupt_backward(self):
         """Cuts a link to my creator function temporarily."""
-        self._org_creator = self.creator
-        self._org_rank = self.rank
         self.creator = None
-        self.rank = 0
 
     def resume_backward(self):
         """Recovers a link to my creator function."""
-        self.creator = self._org_creator
-        self.rank = self._org_rank
-        self._org_creator = None
-        self._org_rank = 0
+        self.creator = self.g_creator
+
+    def get_end_points(self):
+        """Get end points"""
+        funcs = []
+        seen_funcs = set()
+
+        end_points = []
+        seen_end_points = set()
+
+        def add_end_points(cand):
+            if cand not in seen_end_points:
+                # make sure backward() stop at end point.
+                cand.interrupt_backward()
+                heapq.heappush(end_points,
+                               (-cand.rank, len(seen_end_points), cand))
+                seen_end_points.add(cand)
+
+        add_end_points(self)
+        _add_instance(funcs, seen_funcs, self.g_creator)
+        while funcs:
+            func = funcs.pop()
+            for x in func.inputs:
+                if x._is_end_of_sub_graph:
+                    add_end_points(x)
+                _add_instance(funcs, seen_funcs, x.g_creator)
+
+        return end_points
 
     def backward(self, retain_grad=False):
         """Runs error backpropagation (a.k.a. backprop) from this variable.
@@ -478,28 +505,30 @@ Actual: {0}'''.format(type(data))
 
         # print_memory_pool_stats()
 
-        # endp is an end point of sub graph and a starting point of backprop
-        endp = self
-        while endp is not None:
+        # Initialize error by 1, if this is a loss variable
+        if self.data.size == 1 and self.grad is None:
+            with cuda.get_device(self.data) as device:
+                if device is cuda.DummyDevice:
+                    self.grad = numpy.ones_like(self.data)
+                else:
+                    self.grad = cuda.cupy.ones_like(self.data)
 
-            # Initialize error by 1, if this is a loss variable
-            if endp.data.size == 1 and endp.grad is None:
-                with cuda.get_device(endp.data) as device:
-                    if device is cuda.DummyDevice:
-                        endp.grad = numpy.ones_like(endp.data)
-                    else:
-                        endp.grad = cuda.cupy.ones_like(endp.data)
+        end_points = self.get_end_points()
+        if _debug:
+            print('[variable.py]')
+            print('  end_points:{}'.format(end_points))
+
+        # endp is an end point of sub graph and a starting point of backprop
+        _, _, endp = heapq.heappop(end_points)
+        while endp is not None:
+            endp.resume_backward()
+            if _debug:
+                print('  endp:{} {}'.format(endp, endp.creator))
 
             # OOC
             next_endp = None
-            ancestor_vars = endp.ancestors()
-            for x in ancestor_vars:
-                if x._is_end_of_sub_graph is True:
-                    if next_endp is not None:
-                        msg = ('There are a number of end_of_sub_graph '
-                               'variables in a single sub graph.')
-                        raise RuntimeError(msg)
-                    next_endp = x
+            if end_points:
+                _, _, next_endp = heapq.heappop(end_points)
 
             if next_endp is not None:
                 # prefetch data that are necessary for backprop of next_endp
@@ -630,7 +659,6 @@ Actual: {0}'''.format(type(data))
                     runtime.deviceSynchronize()
 
                 endp.unchain_backward()
-                next_endp.resume_backward()
 
             endp = next_endp
 
