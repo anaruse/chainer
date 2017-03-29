@@ -26,7 +26,8 @@ from time import sleep
 # set workspace size for cuDNN
 _free_mem, total_mem = cuda.cupy.cuda.runtime.memGetInfo()
 # size = long(total_mem * 0.1)
-size = long(total_mem * 0.01)
+# size = long(total_mem * 0.01)
+size = int(total_mem * 0.01)
 cuda.set_max_workspace_size(size)
 
 ############################################################
@@ -234,7 +235,7 @@ opt1.setup(model1)
 ############################################################
 
 model2 = VGG16_ooc(use_cudnn=True)
-model2.disable_swapout_params()
+# model2.disable_swapout_params()
 opt2 = optimizers.SGD()
 opt2.setup(model2)
 
@@ -322,7 +323,19 @@ compare_links()
 
 ############################################################
 
-nbatch=16
+import argparse
+parser = argparse.ArgumentParser(description='example OOC for VGG16')
+parser.add_argument('--batch', '-b', type=int, default=16, help='minibatch size')
+parser.add_argument('--ref', '-r', dest='ref', action='store_true')
+parser.set_defaults(ref=False)
+parser.add_argument('--ooc', '-o', dest='ooc', action='store_true')
+parser.set_defaults(ooc=False)
+parser.add_argument('--mem', '-m', dest='mem', action='store_true')
+parser.set_defaults(mem=False)
+
+args = parser.parse_args()
+nbatch=args.batch
+# nbatch=16
 # nbatch=32
 # nbatch=64
 # nbatch=128
@@ -357,8 +370,9 @@ num_loop = 5
 ############################################################
 
 # if False:
-if True:
-    print '#################### Reference model ####################'
+# if True:
+if args.ref:
+    print('#################### Reference model ####################')
     nvtx.RangePush("Reference", 0)
     if (use_GPU):
         model0.to_gpu()
@@ -375,7 +389,7 @@ if True:
         runtime.deviceSynchronize()
         nvtx.RangePop()
     
-        print 'loop:{}, loss:{}'.format(loop, loss0.data)
+        print('loop:{}, loss:{}'.format(loop, loss0.data))
     
         nvtx.RangePush("Backward & Update",2)
         loss0.backward()
@@ -395,8 +409,9 @@ if True:
 ############################################################
 
 # if False:
-if True:
-    print '#################### Reduced memory usage model ####################'
+# if True:
+if args.mem:
+    print('#################### Reduced memory usage model ####################')
     nvtx.RangePush("Reduced mem usage", 1)
     if (use_GPU):
         model1.to_gpu()
@@ -413,7 +428,7 @@ if True:
         runtime.deviceSynchronize()
         nvtx.RangePop()
     
-        print 'loop:{}, loss:{}'.format(loop, loss1.data)
+        print('loop:{}, loss:{}'.format(loop, loss1.data))
     
         nvtx.RangePush("Backward & Update",2)
         loss1.backward()
@@ -433,8 +448,9 @@ if True:
 ############################################################
 
 # if False:
-if True:
-    print '#################### Out-of-core model ####################'
+# if True:
+if args.ooc:
+    print('#################### Out-of-core model ####################')
     nvtx.RangePush("Out-of-core", 2)
     if (use_GPU):
         model2.to_gpu()
@@ -451,7 +467,7 @@ if True:
         runtime.deviceSynchronize()
         nvtx.RangePop()
     
-        print 'loop:{}, loss:{}'.format(loop, loss2.data)
+        print('loop:{}, loss:{}'.format(loop, loss2.data))
     
         nvtx.RangePush("Backward & Update",2)
         loss2.backward()
