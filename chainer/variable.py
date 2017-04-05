@@ -15,7 +15,7 @@ import cupy.cuda.runtime as runtime  # temporal
 
 # import cupy.testing as testing  # temporal
 
-_debug = True
+_debug = False
 
 def _check_grad_type(func, x, gx):
     def make_message(message):
@@ -503,7 +503,8 @@ Actual: {0}'''.format(type(data))
             print("  size_mem(free)  : {}".format(size_mem_free))
             print("  n_free_blocks   : {}".format(n_free_blocks))
 
-        # print_memory_pool_stats()
+        if _debug:
+            print_memory_pool_stats()
 
         # Initialize error by 1, if this is a loss variable
         if self.data.size == 1 and self.grad is None:
@@ -524,6 +525,7 @@ Actual: {0}'''.format(type(data))
             endp.resume_backward()
             if _debug:
                 print('  endp:{} {}'.format(endp, endp.creator))
+                print_memory_pool_stats()
 
             # OOC
             next_endp = None
