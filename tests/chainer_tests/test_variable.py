@@ -604,6 +604,34 @@ class TestVariable(unittest.TestCase):
         cp.testing.assert_array_equal(x.data, d.data)
         cp.testing.assert_array_equal(x.grad, d.grad)
 
+    @attr.gpu
+    def test_to_swap(self):
+        cp = cuda.cupy
+        x_ref = chainer.Variable(self.x)
+        x = copy.deepcopy(x_ref)
+        x.to_gpu()   # CPU -> GPU
+        x.to_swap()  # -> PINN
+        data_dev = chainer.cuda.get_device_from_array(x.data)
+        self.assertEqual(data_dev, chainer.cuda.PinnedMemoryDevice)
+        x.to_gpu()   # -> GPU
+        x.to_cpu()   # -> CPU
+        data_dev = chainer.cuda.get_device_from_array(x.data)
+        self.assertEqual(data_dev, chainer.cuda.DummyDevice)
+        cp.testing.assert_array_equal(x_ref.data, x.data)
+
+    @attr.gpu
+    def test_to_swap_async(self):
+        cp = cuda.cupy
+        x_ref = chainer.Variable(self.x)
+        x = copy.deepcopy(x_ref)
+        st = cuda.Stream()
+        x.to_gpu(stream=st)   # CPU -> GPU
+        x.to_swap(stream=st)  # -> PINN
+        x.to_gpu(stream=st)   # -> GPU
+        x.to_cpu(stream=st)   # -> CPU
+        st.synchronize()
+        cp.testing.assert_array_equal(x_ref.data, x.data)
+
 
 class TestParameter(unittest.TestCase):
 
