@@ -510,20 +510,20 @@ Actual: {0}'''.format(type(data))
         """It indicates that ``grad`` will be set in backward calculation."""
         return self._requires_grad
 
-    def to_cpu(self):
+    def to_cpu(self, stream=None):
         """Copies the data and gradient arrays to CPU."""
         if self.data is None:
             return
 
-        self._data = [cuda.to_cpu(self.data)]
+        self._data = [cuda.to_cpu(self.data, stream=stream)]
         # ensure that the node tracks the device migration
         node = self._node
         if node._data is not None:
             node.retain_data()
         if node._grad is not None:
-            node._grad = cuda.to_cpu(node._grad)
+            node._grad = cuda.to_cpu(node._grad, stream=stream)
 
-    def to_gpu(self, device=None):
+    def to_gpu(self, device=None, stream=None):
         """Copies the data and gradient arrays to specified GPU.
 
         Args:
@@ -535,13 +535,26 @@ Actual: {0}'''.format(type(data))
             current = cuda.Device().id
             self._initial_device = current if device is None else device
         else:
-            self._data = [cuda.to_gpu(self.data, device)]
+            self._data = [cuda.to_gpu(self.data, device, stream=None)]
             # ensure that the node tracks the device migration
             node = self._node
             if node._data is not None:
                 node.retain_data()
             if node._grad is not None:
-                node._grad = cuda.to_gpu(node._grad, device)
+                node._grad = cuda.to_gpu(node._grad, device, stream=None)
+
+    def to_swap(self, stream=None):
+        """Copies the data and gradient arrays to pinned memory."""
+        if self.data is None:
+            return
+
+        self._data = [cuda.to_swap(self.data, stream=None)]
+        # ensure that the node tracks the device migration
+        node = self._node
+        if node._data is not None:
+            node.retain_data()
+        if node._grad is not None:
+            node._grad = cuda.to_swap(node._grad, stream=None)
 
     def cleargrad(self):
         """Clears the gradient array."""
