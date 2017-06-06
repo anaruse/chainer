@@ -95,6 +95,11 @@ def no_recompute(*fnames):
     return configuration.using_config('recompute_targets', targets)
 
 
+def out_of_core_mode():
+    """Enable out of core training mode"""
+    return configuration.using_config('enable_out_of_core', True)
+
+
 class Function(object):
 
     """Function on variables with backpropagation ability.
