@@ -286,6 +286,11 @@ class Function(object):
                     for y in ret:
                         y.set_recompute()
 
+            if getattr(configuration.config, 'enable_out_of_core', False):
+                for y in ret:
+                    print('# function.py:292, ancestors_swapout, {} {}'.format(y.node, y.creator))
+                    y.node.ancestors_swapout()
+
         if len(ret) == 1:
             return ret[0]
         else:

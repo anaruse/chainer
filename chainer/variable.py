@@ -15,6 +15,8 @@ from chainer.initializers import constant
 from chainer import utils
 from chainer.utils import argument
 
+from chainer import configuration
+
 
 def _check_grad_type(func, x, gx):
     def make_message(message):
@@ -282,6 +284,71 @@ class VariableNode(object):
         for (var, data) in zip(out_vars, out_data):
             var.data = data
 
+    def ancestors_swapout(self, stream=None):
+        """..."""
+        ancestor_vnodes = self.ancestors()
+        for vnode in ancestor_vnodes:
+            vnode.to_swap(stream=stream)
+
+    def ancestors_swapin(self, stream=None):
+        """..."""
+        ancestor_vnodes = self.ancestors()
+        for vnode in ancestor_vnodes:
+            vnode.to_gpu(stream=stream)
+
+    def ancestors(self):
+        """Gets a list of my ancestor variable nodes."""
+        ancestor_funcs = []
+        ancestor_vnodes = []
+        seen_funcs = set()
+        seen_vnodes = set()
+
+        def add_cand(ancestors, seen, cand):
+            if cand is not None and cand not in seen:
+                ancestors.append(cand)
+                seen.add(cand)
+
+        add_cand(ancestor_funcs, seen_funcs, self.creator)
+
+        while ancestor_funcs:
+            func = ancestor_funcs.pop()
+            for vnode in func.inputs:
+                add_cand(ancestor_vnodes, seen_vnodes, vnode)
+                add_cand(ancestor_funcs, seen_funcs, vnode.creator)
+
+        return ancestor_vnodes
+
+    def to_swap(self, stream=None):
+        """Copies the data and gradient arrays to pinned memory."""
+        variable = self._variable()
+        if variable is not None:
+            return
+
+        if self.data is not None:
+            # testing
+            array_dev = cuda.get_device_from_array(self.data)
+            if array_dev.id != -2:
+                print('# variable.py:328, to_swap(), {}'.format(self))
+                self._data = cuda.to_swap(self.data, stream=stream)
+
+        if self.grad is not None:
+            self._grad = cuda.to_swap(self._grad, stream=stream)
+
+    def to_gpu(self, stream=None):
+        """Copies the data and gradient arrays to GPU memory."""
+        variable = self._variable()
+        if variable is not None:
+            return
+
+        if self.data is not None:
+            # testing
+            array_dev = cuda.get_device_from_array(self.data)
+            if array_dev.id == -2:
+                print('# variable.py:347, to_gpu(), {}'.format(self))
+                self._data = cuda.to_gpu(self.data, stream=stream)
+
+        if self.grad is not None:
+            self._grad = cuda.to_gpu(self._grad, stream=stream)
 
 def _create_variable(data, name, grad, requires_grad):
     return Variable(
@@ -535,26 +602,26 @@ Actual: {0}'''.format(type(data))
             current = cuda.Device().id
             self._initial_device = current if device is None else device
         else:
-            self._data = [cuda.to_gpu(self.data, device, stream=None)]
+            self._data = [cuda.to_gpu(self.data, device, stream=stream)]
             # ensure that the node tracks the device migration
             node = self._node
             if node._data is not None:
                 node.retain_data()
             if node._grad is not None:
-                node._grad = cuda.to_gpu(node._grad, device, stream=None)
+                node._grad = cuda.to_gpu(node._grad, device, stream=stream)
 
     def to_swap(self, stream=None):
         """Copies the data and gradient arrays to pinned memory."""
         if self.data is None:
             return
 
-        self._data = [cuda.to_swap(self.data, stream=None)]
+        self._data = [cuda.to_swap(self.data, stream=stream)]
         # ensure that the node tracks the device migration
         node = self._node
         if node._data is not None:
             node.retain_data()
         if node._grad is not None:
-            node._grad = cuda.to_swap(node._grad, stream=None)
+            node._grad = cuda.to_swap(node._grad, stream=stream)
 
     def cleargrad(self):
         """Clears the gradient array."""
@@ -734,6 +801,10 @@ Actual: {0}'''.format(type(data))
                 # Negate since heapq is min-heap
                 heapq.heappush(cand_funcs, (-cand.rank, len(seen_set), cand))
                 seen_set.add(cand)
+
+        if getattr(configuration.config, 'enable_out_of_core', False):
+            #print('# variable.py:794, ancestors_swapin, {} {}'.format(self.label, self.creator))
+            self.node.ancestors_swapin()
 
         add_cand(self.creator)
 
