@@ -34,7 +34,6 @@ from chainer.function import Function  # NOQA
 from chainer.function import no_backprop_mode  # NOQA
 from chainer.function import no_recompute  # NOQA
 from chainer.function import use_recompute  # NOQA
-from chainer.function import out_of_core_mode  # NOQA
 from chainer.functions import array  # NOQA
 from chainer.functions.math import basic_math  # NOQA
 from chainer.initializer import Initializer  # NOQA
@@ -55,6 +54,7 @@ from chainer.serializer import Deserializer  # NOQA
 from chainer.serializer import Serializer  # NOQA
 from chainer.variable import Parameter  # NOQA
 from chainer.variable import Variable  # NOQA
+from chainer.variable import out_of_core_mode  # NOQA
 
 
 if sys.version_info[:3] == (3, 5, 0):

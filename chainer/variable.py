@@ -110,6 +110,11 @@ def _add_instance(instances, seen_set, instance):
         seen_set.add(instance)
 
 
+def out_of_core_mode():
+    """Enable out of core training mode"""
+    return configuration.using_config('enable_out_of_core', True)
+
+
 class VariableNode(object):
 
     """Node in the backward computational graph representing a variable.
@@ -297,6 +302,8 @@ class VariableNode(object):
         """..."""
         ancestor_vnodes = self.ancestors()
         for vnode in ancestor_vnodes:
+            if vnode.creator is None:
+                continue
             vnode.to_swap(stream=stream)
 
     def ancestors_swapin(self, stream=None):
@@ -317,7 +324,7 @@ class VariableNode(object):
                 ancestors.append(cand)
                 seen.add(cand)
 
-        add_cand(ancestor_funcs, seen_funcs, self.creator)
+        add_cand(ancestor_funcs, seen_funcs, self._creator_g)
 
         while ancestor_funcs:
             func = ancestor_funcs.pop()
@@ -340,8 +347,8 @@ class VariableNode(object):
                 print('# variable.py:328, to_swap(), {}'.format(self))
                 self._data = cuda.to_swap(self.data, stream=stream)
 
-        if self.grad is not None:
-            self._grad = cuda.to_swap(self._grad, stream=stream)
+        #if self.grad is not None:
+        #    self._grad = cuda.to_swap(self._grad, stream=stream)
 
     def to_gpu(self, stream=None):
         """Copies the data and gradient arrays to GPU memory."""
@@ -356,8 +363,8 @@ class VariableNode(object):
                 print('# variable.py:347, to_gpu(), {}'.format(self))
                 self._data = cuda.to_gpu(self.data, stream=stream)
 
-        if self.grad is not None:
-            self._grad = cuda.to_gpu(self._grad, stream=stream)
+        #if self.grad is not None:
+        #    self._grad = cuda.to_gpu(self._grad, stream=stream)
 
     def interrupt_backward(self):
         """Cuts a link to my creator function temporarily."""
@@ -375,24 +382,20 @@ class VariableNode(object):
         seen_break_points = set()
         seen_vnodes = set()
 
-        def add_break_points(cand):
+        def add_break_point(cand):
             if cand not in seen_break_points and cand.creator is not None:
                 cand.interrupt_backward()
                 heapq.heappush(break_points, 
                                (~cand.rank, len(seen_break_points), cand))
                 seen_break_points.add(cand)
 
-        #print('# variable.py:386, self._creator_g:{}'.format(self._creator_g))
-        add_break_points(self)
-        #print('# variable.py:387, self._creator_g:{}'.format(self._creator_g))
+        add_break_point(self)
         _add_instance(funcs, seen_funcs, self._creator_g)
-        #print('# variable.py:388, funcs: {}'.format(funcs))
         while funcs:
             func = funcs.pop()
-            #print('# variable.py:391, func: {}'.format(func))
             for vnode in func.inputs:
                 if vnode in seen_vnodes:
-                    add_break_points(vnode)
+                    add_break_point(vnode)
                 else:
                     seen_vnodes.add(vnode)
                 _add_instance(funcs, seen_funcs, vnode._creator_g)
@@ -430,17 +433,37 @@ class VariableNode(object):
         """
         root_node = self
 
-        break_points = self.get_break_points()
-        #print('# break_points: {}'.format(break_points))
+        enable_out_of_core = getattr(configuration.config, 'enable_out_of_core', False)
 
-        _rank, _id, break_point = heapq.heappop(break_points)
-        while break_point is not None:
-            break_point.resume_backward()
-            print('# break_point: {} {} {} {}'.format(break_point, _rank, _id, break_point.creator))
-            break_point._backward(retain_grad, root_node)
-            break_point = None
+        break_points = self.get_break_points()
+        print('# break_points: {}'.format(break_points))
+
+        bp_pre = None
+        bp = None
+        _, _, bp_next = heapq.heappop(break_points)
+
+        while bp is not None or bp_next is not None:
+
+            if bp_next is not None:
+                if enable_out_of_core:
+                    print('# variable.py:448, prepare_, {} {}'.format(bp_next, bp_next._creator_g))
+                    bp_next.ancestors_swapin()
+
+            if bp is not None:
+                print('# variable.py:452, backward, {} {}'.format(bp, bp._creator_g))
+                bp.resume_backward()
+                bp._backward(retain_grad, root_node)
+
+            if bp_pre is not None:
+                if enable_out_of_core:
+                    print('# variable.py:458, cleanup_, {} {}'.format(bp_pre, bp_pre._creator_g))
+                    bp_pre.ancestors_swapout()
+
+            bp_pre = bp
+            bp = bp_next
+            bp_next = None
             if break_points:
-                _rank, _id, break_point = heapq.heappop(break_points)
+                _rank, _id, bp_next = heapq.heappop(break_points)
 
     def _backward(self, retain_grad, root_node):
         """ ... """
@@ -465,10 +488,6 @@ class VariableNode(object):
                 # Negate since heapq is min-heap
                 heapq.heappush(cand_funcs, (-cand.rank, len(seen_set), cand))
                 seen_set.add(cand)
-
-        if getattr(configuration.config, 'enable_out_of_core', False):
-            print('# variable.py:423, ancestors_swapin, {} {}'.format(self, self.creator))
-            self.ancestors_swapin()
 
         add_cand(self.creator)
 
