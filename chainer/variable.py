@@ -104,6 +104,12 @@ def variable_str(var):
             ')')
 
 
+def _add_instance(instances, seen_set, instance):
+    if instance is not None and instance not in seen_set:
+        instances.append(instance)
+        seen_set.add(instance)
+
+
 class VariableNode(object):
 
     """Node in the backward computational graph representing a variable.
@@ -157,7 +163,7 @@ class VariableNode(object):
         self.grad = grad
 
         self._recompute = False
-        self._creator_g = self._creator
+        self._creator_g = None
 
     @property
     def creator(self):
@@ -167,7 +173,7 @@ class VariableNode(object):
     @creator.setter
     def creator(self, func):
         self._creator = func
-        self._creator_g = self._creator
+        self._creator_g = func
         if func is not None:
             self._rank = func.rank + 1
 
@@ -222,7 +228,6 @@ class VariableNode(object):
 
         """
         self.creator = creator
-        self._creator_g = self.creator
 
     def unchain(self):
         """Deletes the reference to the creator of this variable node.
@@ -231,7 +236,7 @@ class VariableNode(object):
 
         """
         self.creator = None
-        self._creator_g = self.creator
+        self._creator_g = None
 
     def retain_data(self):
         """Lets the node hold a reference to the underlying data array.
@@ -356,11 +361,43 @@ class VariableNode(object):
 
     def interrupt_backward(self):
         """Cuts a link to my creator function temporarily."""
-        self.creator = None
+        self._creator = None
 
     def resume_backward(self):
         """Recovers a link to my creator function."""
-        self.creator = self._creator_g
+        self._creator = self._creator_g
+
+    def get_break_points(self):
+        """Get break points"""
+        funcs = []
+        seen_funcs = set()
+        break_points = []
+        seen_break_points = set()
+        seen_vnodes = set()
+
+        def add_break_points(cand):
+            if cand not in seen_break_points and cand.creator is not None:
+                cand.interrupt_backward()
+                heapq.heappush(break_points, 
+                               (~cand.rank, len(seen_break_points), cand))
+                seen_break_points.add(cand)
+
+        #print('# variable.py:386, self._creator_g:{}'.format(self._creator_g))
+        add_break_points(self)
+        #print('# variable.py:387, self._creator_g:{}'.format(self._creator_g))
+        _add_instance(funcs, seen_funcs, self._creator_g)
+        #print('# variable.py:388, funcs: {}'.format(funcs))
+        while funcs:
+            func = funcs.pop()
+            #print('# variable.py:391, func: {}'.format(func))
+            for vnode in func.inputs:
+                if vnode in seen_vnodes:
+                    add_break_points(vnode)
+                else:
+                    seen_vnodes.add(vnode)
+                _add_instance(funcs, seen_funcs, vnode._creator_g)
+
+        return break_points
 
     def backward(self, retain_grad=False):
         """Runs error backpropagation (a.k.a. backprop) from this variable.
@@ -392,8 +429,18 @@ class VariableNode(object):
 
         """
         root_node = self
-        self._backward(retain_grad, root_node)
 
+        break_points = self.get_break_points()
+        #print('# break_points: {}'.format(break_points))
+
+        _rank, _id, break_point = heapq.heappop(break_points)
+        while break_point is not None:
+            break_point.resume_backward()
+            print('# break_point: {} {} {} {}'.format(break_point, _rank, _id, break_point.creator))
+            break_point._backward(retain_grad, root_node)
+            break_point = None
+            if break_points:
+                _rank, _id, break_point = heapq.heappop(break_points)
 
     def _backward(self, retain_grad, root_node):
         """ ... """
