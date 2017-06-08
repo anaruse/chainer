@@ -112,9 +112,16 @@ def _add_instance(instances, seen_set, instance):
         seen_set.add(instance)
 
 
-def out_of_core_mode(stream0=None, stream1=None):
+def out_of_core_mode(use_stream=False):
     """Enable out of core training mode"""
-    return configuration.using_config('out_of_core_params', [True, stream0, stream1])
+    stream0 = cuda.Stream(null=True)
+    stream1 = cuda.Stream(null=True)
+    events = []
+    if use_stream:
+        stream0 = cuda.Stream(non_blocking=True)
+        stream1 = cuda.Stream(non_blocking=True)
+    return configuration.using_config('out_of_core_params',
+                                      [True, stream0, stream1, events])
 
 
 class VariableNode(object):
@@ -301,7 +308,8 @@ class VariableNode(object):
         for (var, data) in zip(out_vars, out_data):
             var.data = data
 
-    def ancestors_swapout(self, stream=None, limited=False, inclusive=False):
+    def ancestors_swapout(self, stream=None, inclusive=False,
+                          limited=False, events=None):
         """..."""
         if limited is False:
             ancestor_vnodes = self.ancestors()
@@ -310,12 +318,13 @@ class VariableNode(object):
         if inclusive:
             ancestor_vnodes.append(self)
         if _debug:
-            print('# variablep.py:320, ancestors_swapout(), ancestor_vnodes: {}'.format(ancestor_vnodes))
+            print('# variablep.py:319, *_swapout(), ancestors: {}'.format(
+                    ancestor_vnodes))
 
         for vnode in ancestor_vnodes:
             if vnode.creator is None:
                 continue
-            vnode.to_swap(stream=stream)
+            vnode.to_swap(stream=stream, events=events)
 
     def ancestors_swapin(self, stream=None, inclusive=False):
         """..."""
@@ -323,7 +332,8 @@ class VariableNode(object):
         if inclusive:
             ancestor_vnodes.append(self)
         if _debug:
-            print('# variablep.py:320, ancestors_swapin(), ancestor_vnodes: {}'.format(ancestor_vnodes))
+            print('# variablep.py:333, *_swapin(), ancestors: {}'.format(
+                    ancestor_vnodes))
 
         for vnode in ancestor_vnodes:
             vnode.to_gpu(stream=stream)
@@ -373,7 +383,7 @@ class VariableNode(object):
 
         return ancestor_vnodes
 
-    def to_swap(self, stream=None):
+    def to_swap(self, stream=None, events=None):
         """Copies the data and gradient arrays to pinned memory."""
         variable = self._variable()
         if variable is not None:
@@ -385,22 +395,26 @@ class VariableNode(object):
                 if _debug:
                     print('# variable.py:377, to_swap(), {}'.format(self))
                 self._data = cuda.to_swap(self.data, stream=stream)
+                if stream is not None and events is not None:
+                    events.append(stream.record())
                 self._is_data_swapout = True
 
-        #if self.grad is not None:
-        #    self._grad = cuda.to_swap(self._grad, stream=stream)
+        # if self.grad is not None:
+        #     self._grad = cuda.to_swap(self._grad, stream=stream)
 
-    def to_gpu(self, stream=None):
+    def to_gpu(self, stream=None, events=None):
         """Copies the data and gradient arrays to GPU memory."""
         if self.data is not None:
             if self._is_data_swapout is True:
                 if _debug:
                     print('# variable.py:389, to_gpu(), {}'.format(self))
                 self._data = cuda.to_gpu(self.data, stream=stream)
+                if stream is not None and events is not None:
+                    events.append(stream.record())
                 self._is_data_swapout = False
 
-        #if self.grad is not None:
-        #    self._grad = cuda.to_gpu(self._grad, stream=stream)
+        # if self.grad is not None:
+        #     self._grad = cuda.to_gpu(self._grad, stream=stream)
 
     def interrupt_backward(self):
         """Cuts a link to my creator function temporarily."""
@@ -421,7 +435,7 @@ class VariableNode(object):
         def add_break_point(cand):
             if cand not in seen_break_points and cand.creator is not None:
                 cand.interrupt_backward()
-                heapq.heappush(break_points, 
+                heapq.heappush(break_points,
                                (~cand.rank, len(seen_break_points), cand))
                 seen_break_points.add(cand)
 
@@ -469,48 +483,55 @@ class VariableNode(object):
         """
         root_node = self
 
-        enable_out_of_core, stream0, stream1 = getattr(configuration.config, 'out_of_core_params', [False, None, None])
-        main_stream = None
+        enable_out_of_core, stream0, stream1, events = getattr(
+            configuration.config, 'out_of_core_params', [False, None, None, []])
+        stream_compute = None
         if enable_out_of_core:
-            main_stream = cuda.Stream(null=True)
+            stream_compute = cuda.Stream(null=True)
+            while events:
+                events.pop(0).synchronize()
+
+        events_swapin = []
 
         break_points = self.get_break_points()
         if _debug:
             print('# break_points: {}'.format(break_points))
 
-        bp_pre = None
+        # bp_pre = None
         bp = None
         _, _, bp_next = heapq.heappop(break_points)
 
-        while bp_pre is not None or bp is not None or bp_next is not None:
+        while bp is not None or bp_next is not None:
 
             if bp_next is not None:
                 if _debug:
-                    print('# variable.py:448, prepare_, {} {}'.format(bp_next, bp_next._creator_g))
+                    print('# variable.py:508, prepare_, {} {}'.format(
+                            bp_next, bp_next._creator_g))
                 if enable_out_of_core:
                     bp_next.ancestors_swapin(stream=stream0, inclusive=True)
+                    events_swapin.append(stream0.record())
 
             if bp is not None:
                 if _debug:
-                    print('# variable.py:452, backward, {} {}'.format(bp, bp._creator_g))
+                    print('# variable.py:516, backward, {} {}'.format(
+                            bp, bp._creator_g))
                 if enable_out_of_core:
-                    if stream0 is not None:
-                        stream0.synchronize()
+                    if events_swapin:
+                        event = events_swapin.pop(0)
+                        event.synchronize()
+
                 bp.resume_backward()
                 bp._backward(retain_grad, root_node)
-                if enable_out_of_core:
-                    bp.interrupt_backward()
 
-            if bp_pre is not None:
                 if _debug:
-                    print('# variable.py:458, cleanup_, {} {}'.format(bp_pre, bp_pre._creator_g))
-                if enable_out_of_core:
-                    if main_stream is not None:
-                        main_stream.synchronize()
-                    bp_pre.resume_backward()
-                    bp_pre.ancestors_swapout(stream=stream1, inclusive=True)
+                    print('# variable.py:527, cleanup, {} {}'.format(
+                            bp, bp._creator_g))
+                if enable_out_of_core and len(break_points) > 0:
+                    if stream_compute is not None:
+                        stream_compute.synchronize()
+                    bp.ancestors_swapout(stream=stream1, inclusive=True)
 
-            bp_pre = bp
+            # bp_pre = bp
             bp = bp_next
             bp_next = None
             if break_points:
@@ -522,7 +543,7 @@ class VariableNode(object):
             stream1.synchronize()
 
     def _backward(self, retain_grad, root_node):
-        """ ... """
+        """..."""
 
         initial_device = None
         if cuda.available and isinstance(self.data, cuda.cupy.ndarray):
