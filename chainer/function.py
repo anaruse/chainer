@@ -11,6 +11,9 @@ from chainer.utils import type_check
 from chainer import variable
 
 import copy
+import time
+
+_debug = False
 
 
 def no_backprop_mode():
@@ -281,10 +284,18 @@ class Function(object):
                     for y in ret:
                         y.set_recompute()
 
-            if getattr(configuration.config, 'enable_out_of_core', False):
+            enable_out_of_core, stream0, stream1 = getattr(configuration.config, 'out_of_core_params', [False, None, None])
+
+            if enable_out_of_core:
                 for y in ret:
-                    print('# function.py:292, ancestors_swapout, {} {}'.format(y.node, y.creator))
-                    y.node.ancestors_swapout()
+                    if _debug:
+                        print('# function.py:292, ancestors_swapout, {} {}'.format(y.node, y.creator))
+                    if _debug:
+                        stime = time.time()
+                    y.node.ancestors_swapout(stream=stream0, limited=True)
+                    if _debug:
+                        elapsed = time.time() - stime
+                        print('# function.py:296, elapsed: {}'.format(elapsed))
 
         if len(ret) == 1:
             return ret[0]
