@@ -289,8 +289,7 @@ class Function(object):
                 [False, [None, None], [], False])
 
             if ooc_enabled:
-                stream_compute = cuda.Stream(null=True)
-                streams[0].wait_event(stream_compute.record())
+                streams[0].wait_event(cuda.Stream.null.record())
                 for y in ret:
                     if ooc_debug:
                         print('# function.py:292, *_swapout, {} {}'

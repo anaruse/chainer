@@ -110,7 +110,7 @@ def _add_instance(instances, seen_set, instance):
         seen_set.add(instance)
 
 
-def out_of_core_mode(async=False, debug=False):
+def out_of_core_mode(async=True, debug=False):
     """Enable out of core training mode"""
     events = []
     streams = []
@@ -118,8 +118,8 @@ def out_of_core_mode(async=False, debug=False):
         streams.append(cuda.Stream(non_blocking=True))
         streams.append(cuda.Stream(non_blocking=True))
     else:
-        streams.append(cuda.Stream(null=True))
-        streams.append(cuda.Stream(null=True))
+        streams.append(cuda.Stream.null)
+        streams.append(cuda.Stream.null)
     return configuration.using_config('out_of_core_params',
                                       [True, streams, events, debug])
 
@@ -477,9 +477,8 @@ class VariableNode(object):
         ooc_enabled, streams, events, ooc_debug = getattr(
             configuration.config, 'out_of_core_params',
             [False, [None, None], [], False])
-        stream_compute = None
+
         if ooc_enabled:
-            stream_compute = cuda.Stream(null=True)
             while events:
                 events.pop(0).synchronize()
 
@@ -506,14 +505,15 @@ class VariableNode(object):
                     print('# variable.py:519, backward, {} {}'
                           .format(bp, bp._creator_g))
                 if ooc_enabled:
-                    events_swapin.pop(0).synchronize()
+                    # events_swapin.pop(0).synchronize()
+                    cuda.Stream.null.wait_event(events_swapin.pop(0))
 
                 bp.resume_backward()
                 bp._backward(retain_grad, root_node)
 
                 if ooc_enabled and len(break_points) > 0:
-                    stream_compute.synchronize()
-                    # streams[1].wait_event(stream_compute.record())
+                    cuda.Stream.null.synchronize()
+                    # streams[1].wait_event(cuda.Stream.null.record())
                     bp.ancestors_swapout(stream=streams[1], inclusive=True,
                                          debug=ooc_debug)
 
