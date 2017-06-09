@@ -285,21 +285,29 @@ class Function(object):
                         y.set_recompute()
 
             ooc_enabled, streams, events, ooc_debug = getattr(
-                configuration.config, 'out_of_core_params', [False, [None, None], [], False])
+                configuration.config, 'out_of_core_params',
+                [False, [None, None], [], False])
 
             if ooc_enabled:
+                stream_compute = cuda.Stream(null=True)
+                streams[0].wait_event(stream_compute.record())
                 for y in ret:
                     if ooc_debug:
-                        print('# function.py:292, ancestors_swapout, {} {}'.format(y.node, y.creator))
-                    if ooc_debug:
+                        print('# function.py:292, *_swapout, {} {}'
+                              .format(y.node, y.creator))
                         stime = time.time()
-                    y.node.ancestors_swapout(stream=streams[0], early_stop=True,
-                                             events=events)
-                    if ooc_debug:
-                        elapsed = time.time() - stime
-                        print('# function.py:296, elapsed: {}'.format(elapsed))
 
-                    if len(events) > 5:
+                    y.node.ancestors_swapout(stream=streams[0],
+                                             early_stop=True,
+                                             events=events, debug=ooc_debug)
+                    if ooc_debug:
+                        print('# function.py:301, len(events): {}'
+                              .format(len(events)))
+                        elapsed = time.time() - stime
+                        print('# function.py:305, elapsed: {}'
+                              .format(elapsed))
+
+                    if len(events) > 4:
                         event = events.pop(0)
                         event.synchronize()
 

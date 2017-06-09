@@ -475,7 +475,8 @@ class VariableNode(object):
         root_node = self
 
         ooc_enabled, streams, events, ooc_debug = getattr(
-            configuration.config, 'out_of_core_params', [False, [None, None], [], False])
+            configuration.config, 'out_of_core_params',
+            [False, [None, None], [], False])
         stream_compute = None
         if ooc_enabled:
             stream_compute = cuda.Stream(null=True)
@@ -490,13 +491,11 @@ class VariableNode(object):
 
         bp = None
         _, _, bp_next = heapq.heappop(break_points)
-
         while bp is not None or bp_next is not None:
-
             if bp_next is not None:
                 if ooc_debug:
-                    print('# variable.py:510, prepare_, {} {}'.format(
-                            bp_next, bp_next._creator_g))
+                    print('# variable.py:510, prepare_, {} {}'
+                          .format(bp_next, bp_next._creator_g))
                 if ooc_enabled:
                     bp_next.ancestors_swapin(stream=streams[0], inclusive=True,
                                              debug=ooc_debug)
@@ -504,8 +503,8 @@ class VariableNode(object):
 
             if bp is not None:
                 if ooc_debug:
-                    print('# variable.py:519, backward, {} {}'.format(
-                            bp, bp._creator_g))
+                    print('# variable.py:519, backward, {} {}'
+                          .format(bp, bp._creator_g))
                 if ooc_enabled:
                     events_swapin.pop(0).synchronize()
 
@@ -514,6 +513,7 @@ class VariableNode(object):
 
                 if ooc_enabled and len(break_points) > 0:
                     stream_compute.synchronize()
+                    # streams[1].wait_event(stream_compute.record())
                     bp.ancestors_swapout(stream=streams[1], inclusive=True,
                                          debug=ooc_debug)
 
