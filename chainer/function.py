@@ -284,17 +284,18 @@ class Function(object):
                     for y in ret:
                         y.set_recompute()
 
-            enable_out_of_core, stream0, stream1, events = getattr(
-                configuration.config, 'out_of_core_params', [False, None, None, []])
+            ooc_enabled, streams, events, ooc_debug = getattr(
+                configuration.config, 'out_of_core_params', [False, [None, None], [], False])
 
-            if enable_out_of_core:
+            if ooc_enabled:
                 for y in ret:
-                    if _debug:
+                    if ooc_debug:
                         print('# function.py:292, ancestors_swapout, {} {}'.format(y.node, y.creator))
-                    if _debug:
+                    if ooc_debug:
                         stime = time.time()
-                    y.node.ancestors_swapout(stream=stream0, limited=True, events=events)
-                    if _debug:
+                    y.node.ancestors_swapout(stream=streams[0], early_stop=True,
+                                             events=events)
+                    if ooc_debug:
                         elapsed = time.time() - stime
                         print('# function.py:296, elapsed: {}'.format(elapsed))
 
