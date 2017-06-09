@@ -284,6 +284,14 @@ class Function(object):
                     for y in ret:
                         y.set_recompute()
 
+            for x in self.inputs:
+                x._ref_count_as_input += 1
+                if x._recompute and x._ref_count_as_input > 1:
+                    # Cancels to apply recompute to this variable node,
+                    # because this is used by multiple functions.
+                    x._recompute = False
+                    x.retain_data()
+
             ooc_enabled, streams, events, ooc_debug = getattr(
                 configuration.config, 'out_of_core_params',
                 [False, [None, None], [], False])

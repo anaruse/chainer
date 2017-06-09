@@ -177,6 +177,7 @@ class VariableNode(object):
         self.grad = grad
 
         self._recompute = False
+        self._ref_count_as_input = 0
         self._creator_g = None
         self._is_data_swapout = False
 
@@ -268,7 +269,7 @@ class VariableNode(object):
             raise RuntimeError('cannot retain variable data: the variable has '
                                'been already released')
 
-        if self._recompute is True:
+        if self._recompute:
             self.data = None
 
     def _set_data_type(self, d):
