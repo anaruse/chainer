@@ -34,12 +34,17 @@ class GoogLeNet(chainer.Chain):
 
     def __call__(self, x, t):
         h = F.relu(self.conv1(x))
+        h.set_break_point()
         h = F.local_response_normalization(
             F.max_pooling_2d(h, 3, stride=2), n=5)
+        h.set_break_point()
         h = F.relu(self.conv2_reduce(h))
+        h.set_break_point()
         h = F.relu(self.conv2(h))
+        h.set_break_point()
         h = F.max_pooling_2d(
             F.local_response_normalization(h, n=5), 3, stride=2)
+        h.set_break_point()
 
         h = self.inc3a(h)
         h = self.inc3b(h)
@@ -48,8 +53,10 @@ class GoogLeNet(chainer.Chain):
 
         l = F.average_pooling_2d(h, 5, stride=3)
         l = F.relu(self.loss1_conv(l))
+        l.set_break_point()
         l = F.relu(self.loss1_fc1(l))
         l = self.loss1_fc2(l)
+        l.set_break_point()
         loss1 = F.softmax_cross_entropy(l, t)
 
         h = self.inc4b(h)
@@ -58,8 +65,10 @@ class GoogLeNet(chainer.Chain):
 
         l = F.average_pooling_2d(h, 5, stride=3)
         l = F.relu(self.loss2_conv(l))
+        l.set_break_point()
         l = F.relu(self.loss2_fc1(l))
         l = self.loss2_fc2(l)
+        l.set_break_point()
         loss2 = F.softmax_cross_entropy(l, t)
 
         h = self.inc4e(h)
@@ -69,6 +78,7 @@ class GoogLeNet(chainer.Chain):
 
         h = F.average_pooling_2d(h, 7, stride=1)
         h = self.loss3_fc(F.dropout(h, 0.4))
+        h.set_break_point()
         loss3 = F.softmax_cross_entropy(h, t)
 
         loss = 0.3 * (loss1 + loss2) + loss3

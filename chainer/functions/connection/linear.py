@@ -1,3 +1,4 @@
+from chainer import configuration
 from chainer import function
 from chainer.utils import type_check
 
@@ -9,6 +10,12 @@ def _as_mat(x):
 
 
 class LinearFunction(function.Function):
+
+    def __init__(self):
+        self._recompute = False
+        _fnames = getattr(configuration.config, 'recompute_targets', [])
+        if "LINEAR" in _fnames:
+            self._recompute = True
 
     def check_type_forward(self, in_types):
         n_in = in_types.size()

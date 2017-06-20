@@ -384,7 +384,7 @@ class VariableNode(object):
         if self.data is not None:
             if self._is_data_swapout is False:
                 if debug:
-                    print('# variable.py:377, to_swap(), {}'.format(self))
+                    print('# variable.py:377, to_swap(), {} {}'.format(self, self._creator))
                 self._data = cuda.to_swap(self.data, stream=stream)
                 if stream is not None and events is not None:
                     events.append(stream.record())
@@ -416,6 +416,14 @@ class VariableNode(object):
         """Recovers a link to my creator function."""
         self._creator = self._creator_g
 
+    def set_break_point(self):
+        """Set break point"""
+        self._break_point = True
+        if self._recompute:
+            # Cancels to apply recompute to self.
+            self._recompute = False
+            self.retain_data()
+
     def get_break_points(self):
         """Get break points"""
         funcs = []
@@ -438,8 +446,14 @@ class VariableNode(object):
             for vnode in func.inputs:
                 if vnode in seen_vnodes:
                     add_break_point(vnode)
-                else:
+                if getattr(vnode, '_break_point', False):
+                    add_break_point(vnode)
+                    # debug
+                    # print('# variable.py:448, user set break point: {}'.format(vnode))
+
+                if vnode not in seen_vnodes:
                     seen_vnodes.add(vnode)
+
                 _add_instance(funcs, seen_funcs, vnode._creator_g)
 
         return break_points
@@ -1030,6 +1044,10 @@ Actual: {0}'''.format(type(data))
     def do_recompute(self):
         """Re-compute my data"""
         self._node.do_recompute()
+
+    def set_break_point(self):
+        """Set break point"""
+        self._node.set_break_point()
 
     def backward(self, retain_grad=False):
         """Runs error backpropagation (a.k.a. backprop) from this variable.
