@@ -110,7 +110,7 @@ def _add_instance(instances, seen_set, instance):
         seen_set.add(instance)
 
 
-def out_of_core_mode(async=True, debug=False):
+def out_of_core_mode(async=True, fine_granularity=False, debug=False):
     """Enable out of core training mode"""
     events = []
     streams = []
@@ -121,7 +121,7 @@ def out_of_core_mode(async=True, debug=False):
         streams.append(cuda.Stream.null)
         streams.append(cuda.Stream.null)
     return configuration.using_config('out_of_core_params',
-                                      [True, streams, events, debug])
+                                      [True, async, fine_granularity, streams, events, debug])
 
 
 class VariableNode(object):
@@ -288,6 +288,10 @@ class VariableNode(object):
         """Set recompute mode enabled"""
         self._recompute = True
 
+    def unset_recompute(self):
+        """Unset recompute mode enabled"""
+        self._recompute = False
+
     def do_recompute(self):
         """Re-compute my data"""
         func = self.creator
@@ -424,7 +428,7 @@ class VariableNode(object):
             self._recompute = False
             self.retain_data()
 
-    def get_break_points(self):
+    def get_break_points(self, fine_granularity=False):
         """Get break points"""
         funcs = []
         seen_funcs = set()
@@ -450,6 +454,9 @@ class VariableNode(object):
                     add_break_point(vnode)
                     # debug
                     # print('# variable.py:448, user set break point: {}'.format(vnode))
+
+                if fine_granularity and vnode.data is not None:
+                    add_break_point(vnode)
 
                 if vnode not in seen_vnodes:
                     seen_vnodes.add(vnode)
@@ -489,9 +496,9 @@ class VariableNode(object):
         """
         root_node = self
 
-        ooc_enabled, streams, events, ooc_debug = getattr(
+        ooc_enabled, ooc_async, fine_granularity, streams, events, ooc_debug = getattr(
             configuration.config, 'out_of_core_params',
-            [False, [None, None], [], False])
+            [False, True, False, [None, None], [], False])
 
         if ooc_enabled:
             while events:
@@ -499,7 +506,7 @@ class VariableNode(object):
 
         events_swapin = []
 
-        break_points = self.get_break_points()
+        break_points = self.get_break_points(fine_granularity)
         if ooc_debug:
             print('# break_points: {}'.format(break_points))
 
@@ -514,6 +521,9 @@ class VariableNode(object):
                     bp_next.ancestors_swapin(stream=streams[0], inclusive=True,
                                              debug=ooc_debug)
                     events_swapin.append(streams[0].record())
+
+            if ooc_async is False:
+                bp = bp_next
 
             if bp is not None:
                 if ooc_debug:
@@ -1165,6 +1175,10 @@ Actual: {0}'''.format(type(data))
     def set_recompute(self):
         """Set recompute mode enabled"""
         self.node.set_recompute()
+
+    def unset_recompute(self):
+        """Unset recompute mode enabled"""
+        self.node.unset_recompute()
 
     def __lt__(self, other):
         raise NotImplementedError()

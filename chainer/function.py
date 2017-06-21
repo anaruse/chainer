@@ -236,6 +236,12 @@ class Function(object):
         for hook in six.itervalues(hooks):
             hook.forward_preprocess(self, in_data)
 
+        # if getattr(self, '_recompute', False) is False:
+        #     _fnames = getattr(configuration.config, 'recompute_targets', [])
+        #     if "_ALL_" in _fnames:
+        #         self._recompute = True
+        #         # print('# function.py:224, force recompute: {}'.format(self))  # debug
+
         # Forward prop
         with cuda.get_device_from_array(*in_data):
             self._input_indexes_to_retain = None
@@ -292,9 +298,9 @@ class Function(object):
                     x._recompute = False
                     x.retain_data()
 
-            ooc_enabled, streams, events, ooc_debug = getattr(
+            ooc_enabled, _, _, streams, events, ooc_debug = getattr(
                 configuration.config, 'out_of_core_params',
-                [False, [None, None], [], False])
+                [False, True, False, [None, None], [], False])
 
             if ooc_enabled:
                 streams[0].wait_event(cuda.Stream.null.record())
