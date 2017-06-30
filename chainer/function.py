@@ -233,7 +233,8 @@ class Function(object):
         if self._n_local_function_hooks != 0:
             hooks = collections.OrderedDict(hooks)
             hooks.update(self.local_function_hooks)
-        for hook in six.itervalues(hooks):
+        hooks = hooks.values()  # avoid six for performance
+        for hook in hooks:
             hook.forward_preprocess(self, in_data)
 
         # if getattr(self, '_recompute', False) is False:
@@ -248,7 +249,7 @@ class Function(object):
             self._output_indexes_to_retain = None
             outputs = self.forward(in_data)
             assert type(outputs) == tuple
-        for hook in six.itervalues(hooks):
+        for hook in hooks:
             hook.forward_postprocess(self, in_data)
 
         if chainer.is_debug():
@@ -258,8 +259,8 @@ class Function(object):
                 msg = 'NaN is detected on forward computation'
                 raise RuntimeError(msg)
 
-        ret = tuple([variable.Variable(y, requires_grad=requires_grad)
-                     for y in outputs])
+        ret = [variable.Variable(y, requires_grad=requires_grad)
+               for y in outputs]
 
         if configuration.config.enable_backprop:
             # Topological ordering
@@ -327,7 +328,7 @@ class Function(object):
         if len(ret) == 1:
             return ret[0]
         else:
-            return ret
+            return tuple(ret)
 
     @property
     def local_function_hooks(self):
