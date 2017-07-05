@@ -32,6 +32,34 @@ def _cu_conv_sum(y, x, n):
                              size=x.shape[0] * rdim)
 
 
+def _cu_conv_square_sum(y, x, n):
+    # Convolutional square sum
+    # TODO(beam2d): Use scan computation
+    rdim = x.size // (x.shape[0] * x.shape[1])
+    cuda.elementwise(
+        'raw T x, int32 rdim, int32 N, int32 n_', 'raw T y',
+        '''
+          int half_n = n_ / 2;
+          int offset = i / rdim * N * rdim + i % rdim;
+
+          float sum_part = 0;
+          for (int j = 0; j < N + half_n; ++j) {
+            if (j < N) {
+              T xj = x[offset + j * rdim];
+              sum_part += xj * xj;
+            }
+            if (j >= n_) {
+              T xj = x[offset + (j - n_) * rdim];
+              sum_part -= xj * xj;
+            }
+            if (j >= half_n) {
+              y[offset + (j - half_n) * rdim] = sum_part;
+            }
+          }
+        ''', 'lrn_conv_square_sum')(x, rdim, x.shape[1], n, y,
+                                    size=x.shape[0] * rdim)
+
+
 class LocalResponseNormalization(function.Function):
 
     """Cross-channel normalization function used in AlexNet."""
@@ -76,7 +104,7 @@ class LocalResponseNormalization(function.Function):
 
     def forward_gpu(self, x):
         y = cuda.cupy.square(x[0])  # temporary
-        scale = cuda.cupy.empty_like(y)
+        scale = cuda.cupy.empty_like(x[0])
         _cu_conv_sum(scale, y, self.n)
         cuda.elementwise(
             'T x, T k, T alpha, T beta',
@@ -89,9 +117,8 @@ class LocalResponseNormalization(function.Function):
         return y,
 
     def backward_gpu(self, x, gy):
-        y = cuda.cupy.square(x[0])  # temporary
-        scale = cuda.cupy.empty_like(y)
-        _cu_conv_sum(scale, y, self.n)
+        scale = cuda.cupy.empty_like(x[0])
+        _cu_conv_square_sum(scale, x[0], self.n)
         cuda.elementwise(
             'T k, T alpha, T beta',
             'T scale',
