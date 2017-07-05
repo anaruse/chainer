@@ -75,23 +75,25 @@ class LocalResponseNormalization(function.Function):
         return gx,
 
     def forward_gpu(self, x):
-        self.y = cuda.cupy.square(x[0])  # temporary
-        self.scale = cuda.cupy.empty_like(self.y)
-        _cu_conv_sum(self.scale, self.y, self.n)
+        y = cuda.cupy.square(x[0])  # temporary
+        self.scale = cuda.cupy.empty_like(y)
+        _cu_conv_sum(self.scale, y, self.n)
         cuda.elementwise(
             'T x, T k, T alpha, T beta',
             'T y, T scale',
             '''scale = k + alpha * scale;
                y = x * pow(scale, -beta);''',
             'lrn_fwd')(x[0], self.k, self.alpha, self.beta,
-                       self.y, self.scale)
-        return self.y,
+                       y, self.scale)
+        self.retain_outputs((0,))
+        return y,
 
     def backward_gpu(self, x, gy):
+        y = self.output_data[0]
         summand = cuda.elementwise(
             'T scale, T y, T gy', 'T summand',
             'summand = y * gy / scale',
-            'lrn_bwd_summand')(self.scale, self.y, gy[0])
+            'lrn_bwd_summand')(self.scale, y, gy[0])
         gx = cuda.cupy.empty_like(x[0])
         _cu_conv_sum(gx, summand, self.n)
         cuda.elementwise(
