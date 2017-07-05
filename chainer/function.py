@@ -237,11 +237,19 @@ class Function(object):
         for hook in hooks:
             hook.forward_preprocess(self, in_data)
 
+        ooc_enabled, _, _, streams, events, ooc_debug = getattr(
+            configuration.config, 'out_of_core_params',
+            [False, True, False, [None, None], [], False])
+
         # if getattr(self, '_recompute', False) is False:
         #     _fnames = getattr(configuration.config, 'recompute_targets', [])
         #     if "_ALL_" in _fnames:
         #         self._recompute = True
         #         # print('# function.py:224, force recompute: {}'.format(self))  # debug
+
+        if ooc_debug:
+            _rank = max([x.rank for x in inputs]) if inputs else 0
+            print('# function.py:248, {}, {}'.format(_rank, self))
 
         # Forward prop
         with cuda.get_device_from_array(*in_data):
@@ -251,6 +259,12 @@ class Function(object):
             assert type(outputs) == tuple
         for hook in hooks:
             hook.forward_postprocess(self, in_data)
+
+        if ooc_debug:
+            for y in outputs:
+                size = y.data.mem.size
+                ptr = y.data.mem.ptr
+                print('# function.py:261, {} ({})'.format(size, ptr))
 
         if chainer.is_debug():
             if any(out.dtype.kind == 'f' and
@@ -298,10 +312,6 @@ class Function(object):
                     # because this is used by multiple functions.
                     x._recompute = False
                     x.retain_data()
-
-            ooc_enabled, _, _, streams, events, ooc_debug = getattr(
-                configuration.config, 'out_of_core_params',
-                [False, True, False, [None, None], [], False])
 
             if ooc_enabled:
                 streams[0].wait_event(cuda.Stream.null.record())
