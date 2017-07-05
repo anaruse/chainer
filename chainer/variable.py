@@ -17,6 +17,7 @@ from chainer.utils import argument
 
 from chainer import configuration
 
+from chainer.cuda import memory_pool
 
 def _check_grad_type(func, x, gx):
     def make_message(message):
@@ -327,8 +328,8 @@ class VariableNode(object):
                     ancestor_vnodes))
 
         for vnode in ancestor_vnodes:
-            if vnode.creator is None:
-                continue
+            # if vnode.creator is None:
+            #     continue
             vnode.to_swap(stream=stream, events=events, debug=debug)
 
     def ancestors_swapin(self, stream=None, inclusive=False,
@@ -419,6 +420,65 @@ class VariableNode(object):
     def resume_backward(self):
         """Recovers a link to my creator function."""
         self._creator = self._creator_g
+
+    def _show_memory_usage(self):
+        """Show memory usage."""
+        tmp = []
+        seen_tmp = set()
+
+        funcs = []
+        seen_funcs = set()
+
+        _add_instance(tmp, seen_tmp, self._creator_g)
+        while tmp:
+            func = tmp.pop()
+            heapq.heappush(funcs, (~func.rank, len(seen_funcs), func))
+            seen_funcs.add(func)
+            for vnode in func.inputs:
+                if vnode._creator_g is not None:
+                    _add_instance(tmp, seen_tmp, vnode._creator_g)
+
+        print('# _show_memory_usage()')
+
+        total_data_size = 0
+        total_grad_size = 0
+        total_param_size = 0
+        total_unkn_size = 0
+        while funcs:
+            rank, _, func = heapq.heappop(funcs)
+            outputs = [y() for y in func.outputs]
+            for y in outputs:
+                if y.data is not None:
+                    if y._is_data_swapout is False:
+                        size = y.data.data.mem.size
+                        ptr = y.data.data.mem.ptr
+                        print('#     {} data {} {} ({})'.format(rank, func, size, ptr))
+                        total_data_size += size
+                if y.grad is not None:
+                    size = y.grad.data.mem.size
+                    ptr = y.grad.data.mem.ptr
+                    print('#     {} grad {} {} ({})'.format(rank, func, size, ptr))
+                    total_grad_size += size
+
+            for varn in func.inputs:
+                var = varn._variable()
+                if var is not None and var.__class__.__name__ == 'Parameter':
+                    size = var.data.data.mem.size
+                    ptr = var.data.data.mem.ptr
+                    # print('#     {} param {} {} ({})'.format(rank, func, size, ptr))
+                    total_param_size += size
+                else:
+                    if varn._creator_g is not None:
+                        continue
+                    size = varn.data.data.mem.size
+                    ptr = varn.data.data.mem.ptr
+                    print('#     {} unkn {} {} ({})'.format(rank, func, size, ptr))
+                    total_unkn_size += size
+
+        print('#     total_data_size: {}'.format(total_data_size))
+        print('#     total_grad_size: {}'.format(total_grad_size))
+        print('#     total_para_size: {}'.format(total_param_size))
+        print('#     total_unkn_size: {}'.format(total_unkn_size))
 
     def set_break_point(self):
         """Set break point"""
@@ -517,18 +577,29 @@ class VariableNode(object):
                 if ooc_debug:
                     print('# variable.py:510, prepare_, {} {}'
                           .format(bp_next, bp_next._creator_g))
+                    print('#    total_bytes: {}'.format(memory_pool.total_bytes()))
+                    print('#     free_bytes: {}'.format(memory_pool.free_bytes()))
+                    print('#     used_bytes: {}'.format(memory_pool.used_bytes()))
+                    root_node._show_memory_usage()
+
                 if ooc_enabled:
                     bp_next.ancestors_swapin(stream=streams[0], inclusive=True,
                                              debug=ooc_debug)
                     events_swapin.append(streams[0].record())
 
             if ooc_async is False:
+                cuda.Stream.null.synchronize()
                 bp = bp_next
 
             if bp is not None:
                 if ooc_debug:
                     print('# variable.py:519, backward, {} {}'
                           .format(bp, bp._creator_g))
+                    print('#    total_bytes: {}'.format(memory_pool.total_bytes()))
+                    print('#     free_bytes: {}'.format(memory_pool.free_bytes()))
+                    print('#     used_bytes: {}'.format(memory_pool.used_bytes()))
+                    root_node._show_memory_usage()
+
                 if ooc_enabled:
                     # events_swapin.pop(0).synchronize()
                     cuda.Stream.null.wait_event(events_swapin.pop(0))
@@ -542,6 +613,9 @@ class VariableNode(object):
                     bp.ancestors_swapout(stream=streams[1], inclusive=True,
                                          debug=ooc_debug)
 
+            if ooc_async is False:
+                cuda.Stream.null.synchronize()
+
             bp = bp_next
             bp_next = None
             if break_points:
@@ -553,6 +627,10 @@ class VariableNode(object):
 
     def _backward(self, retain_grad, root_node):
         """..."""
+
+        _, _, _, _, _, ooc_debug = getattr(
+            configuration.config, 'out_of_core_params',
+            [False, True, False, [None, None], [], False])
 
         initial_device = None
         if cuda.available and isinstance(self.data, cuda.cupy.ndarray):
@@ -584,6 +662,9 @@ class VariableNode(object):
             for x in func.inputs:
                 if x._recompute is True and x.data is None:
                     x.do_recompute()
+
+            if ooc_debug:
+                root_node._show_memory_usage()
 
             in_data = tuple([x.data for x in func.inputs])
             out_grad = tuple([None if y is None else y.grad for y in outputs])
