@@ -1,10 +1,12 @@
 import numpy
 import six
 
+from chainer import configuration
 from chainer import cuda
 from chainer import function
 from chainer.utils import type_check
 
+_debug = False
 
 def _cu_conv_sum(y, x, n):
     # Convolutional sum
@@ -70,6 +72,13 @@ class LocalResponseNormalization(function.Function):
         self.alpha = alpha
         self.beta = beta
 
+        self.use_blocking = False
+        execution_policy = getattr(configuration.config, 'execution_policy', None)
+        if execution_policy is 'memory_usage':
+            self.use_blocking = True
+        if _debug:
+            print('# LRN:81, use_blocking: {}'.format(self.use_blocking))
+
     def check_type_forward(self, in_types):
         type_check.expect(in_types.size() == 1)
         x_type, = in_types
@@ -113,12 +122,61 @@ class LocalResponseNormalization(function.Function):
                y = x * pow(scale, -beta);''',
             'lrn_fwd')(x[0], self.k, self.alpha, self.beta,
                        y, scale)
+
+        if x[0].ndim != 4:
+            self.use_blocking = False
+        if self.use_blocking:
+            self.gx = scale
+
         self.retain_outputs((0,))
         return y,
 
     def backward_gpu(self, x, gy):
-        scale = cuda.cupy.empty_like(x[0])
-        _cu_conv_square_sum(scale, x[0], self.n)
+        y = self.output_data[0]
+        if self.use_blocking is False:
+            gx = self._backward_gpu_core(x[0], gy[0], y)
+            return gx,
+
+        gx = getattr(self, 'gx', None)
+        if gx is None:
+            gx = cuda.cupy.empty_like(x[0])
+        else:
+            self.gx = None
+
+        _step_b, _step_h, _step_w = [32, 64, 64]
+        _dim_b, _dim_c, _dim_h, _dim_w = x[0].shape
+        for _start_b in range(0, _dim_b, _step_b):
+            _end_b = min(_start_b + _step_b, _dim_b)
+            _size_b = _end_b - _start_b
+
+            for _start_h in range(0, _dim_h, _step_h):
+                _end_h = min(_start_h + _step_h, _dim_h)
+                _size_h = _end_h - _start_h
+
+                for _start_w in range(0, _dim_w, _step_w):
+                    _end_w = min(_start_w + _step_w, _dim_w)
+                    _size_w = _end_w - _start_w
+
+                    if _debug:
+                        print('# LRN:162, _b:{}, _h:{}, _w:{}'.format([_start_b, _end_b], [_start_h, _end_h], [_start_w, _end_w]))
+
+                    sub_x = x[0][_start_b:_end_b, :, _start_h:_end_h, _start_w:_end_w]
+                    sub_gy = gy[0][_start_b:_end_b, :, _start_h:_end_h, _start_w:_end_w]
+                    sub_y = y[_start_b:_end_b, :, _start_h:_end_h, _start_w:_end_w]
+
+                    sub_gx = self._backward_gpu_core(sub_x, sub_gy, sub_y)
+                    del sub_x
+                    del sub_gy
+                    del sub_y
+
+                    gx[_start_b:_end_b, :, _start_h:_end_h, _start_w:_end_w] = sub_gx
+                    del sub_gx
+
+        return gx,
+
+    def _backward_gpu_core(self, x, gy, y):
+        scale = cuda.cupy.empty_like(x)
+        _cu_conv_square_sum(scale, x, self.n)
         cuda.elementwise(
             'T k, T alpha, T beta',
             'T scale',
@@ -126,19 +184,21 @@ class LocalResponseNormalization(function.Function):
             'lrn_fwd_part')(self.k, self.alpha, self.beta,
                             scale)
 
-        y = self.output_data[0]
         summand = cuda.elementwise(
             'T scale, T y, T gy', 'T summand',
             'summand = y * gy / scale',
-            'lrn_bwd_summand')(scale, y, gy[0])
-        gx = cuda.cupy.empty_like(x[0])
+            'lrn_bwd_summand')(scale, y, gy)
+        gx = cuda.cupy.empty_like(x)
         _cu_conv_sum(gx, summand, self.n)
         cuda.elementwise(
             ' T x, T gy, T scale, T beta, T coeff', 'T gx',
             'gx = pow(scale, -beta) * gy - coeff * x * gx',
-            'lrn_bwd')(x[0], gy[0], scale,
+            'lrn_bwd')(x, gy, scale,
                        self.beta, 2 * self.alpha * self.beta, gx)
-        return gx,
+        del scale
+        del summand
+
+        return gx
 
 
 def local_response_normalization(x, n=5, k=2, alpha=1e-4, beta=.75):

@@ -328,8 +328,9 @@ class VariableNode(object):
                     ancestor_vnodes))
 
         for vnode in ancestor_vnodes:
-            # if vnode.creator is None:
-            #     continue
+            if vnode.creator is None:
+                continue
+
             vnode.to_swap(stream=stream, events=events, debug=debug)
 
     def ancestors_swapin(self, stream=None, inclusive=False,
@@ -379,12 +380,13 @@ class VariableNode(object):
         return ancestor_vnodes
 
     def to_swap(self, stream=None, events=None,
-                debug=False):
+                debug=False, force=False):
         """Copies the data and gradient arrays to pinned memory."""
         variable = self._variable()
-        if variable is not None:
-            # Does not swap-out the array when it is linked from the variable.
-            return
+        if force is False:
+            if variable is not None:
+                # Does not swap-out the array when it is linked from the variable.
+                return
 
         if self.data is not None:
             if self._is_data_swapout is False:
@@ -467,13 +469,13 @@ class VariableNode(object):
                     ptr = var.data.data.mem.ptr
                     # print('#     {} param {} {} ({})'.format(rank, func, size, ptr))
                     total_param_size += size
-                else:
-                    if varn._creator_g is not None:
-                        continue
-                    size = varn.data.data.mem.size
-                    ptr = varn.data.data.mem.ptr
-                    print('#     {} unkn {} {} ({})'.format(rank, func, size, ptr))
-                    total_unkn_size += size
+                # else:
+                #     if varn._creator_g is not None:
+                #         continue
+                #     size = varn.data.data.mem.size
+                #     ptr = varn.data.data.mem.ptr
+                #     print('#     {} unkn {} {} ({})'.format(rank, func, size, ptr))
+                #     total_unkn_size += size
 
         print('#     total_data_size: {}'.format(total_data_size))
         print('#     total_grad_size: {}'.format(total_grad_size))
