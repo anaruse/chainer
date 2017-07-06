@@ -98,6 +98,11 @@ def no_recompute(*fnames):
     return configuration.using_config('recompute_targets', targets)
 
 
+def execution_policy(policy):
+    """Set execution policy"""
+    return configuration.using_config('execution_policy', policy)
+
+
 class Function(object):
 
     """Function on variables with backpropagation ability.
