@@ -126,7 +126,8 @@ class LocalResponseNormalization(function.Function):
         if x[0].ndim != 4:
             self.use_blocking = False
         if self.use_blocking:
-            self.gx = scale
+            # self.gx = scale
+            self.gx = None
 
         self.retain_outputs((0,))
         return y,
