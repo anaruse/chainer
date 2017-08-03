@@ -27,6 +27,7 @@ def _batch_normalization(expander, gamma, beta, x, mean, var, eps, test):
     'test': [True, False],
     'ndim': [0, 1, 2, 3],
     'dtype': [numpy.float16, numpy.float32, numpy.float64],
+    'use_gpu': [True, False],
 })))
 class BatchNormalizationTest(unittest.TestCase):
 
@@ -34,7 +35,24 @@ class BatchNormalizationTest(unittest.TestCase):
         self.expander = (None, Ellipsis) + (None,) * self.ndim
         self.aggr_axes = (0,) + tuple(six.moves.range(2, self.ndim + 2))
 
+        shape = (5, 3) + (2,) * self.ndim
+        self.x = numpy.random.uniform(-1, 1, shape).astype(self.dtype)
+        self.gy = numpy.random.uniform(-1, 1, shape).astype(self.dtype)
+
         self.link = links.BatchNormalization(3, dtype=self.dtype)
+
+        # This is work-around to ensure that the parameters like gamma and beta
+        # are to be initialized as appropriate data type
+        if (chainer.should_use_cudnn('>=auto', 5000) and
+                self.dtype == numpy.float16):
+            x = self.x.copy()
+            if self.use_gpu:
+                x = cuda.to_gpu(x)
+                self.link.to_gpu()
+            self.link(x)
+            if self.use_gpu:
+                self.link.to_cpu()
+
         gamma = self.link.gamma.data
         gamma[...] = numpy.random.uniform(.5, 1, gamma.shape)
         beta = self.link.beta.data
@@ -43,10 +61,6 @@ class BatchNormalizationTest(unittest.TestCase):
 
         self.gamma = gamma.copy()[self.expander]  # fixed on CPU
         self.beta = beta.copy()[self.expander]   # fixed on CPU
-
-        shape = (5, 3) + (2,) * self.ndim
-        self.x = numpy.random.uniform(-1, 1, shape).astype(self.dtype)
-        self.gy = numpy.random.uniform(-1, 1, shape).astype(self.dtype)
 
         if self.test:
             self.mean = numpy.random.uniform(-1, 1, (3,)).astype(self.dtype)
@@ -77,13 +91,15 @@ class BatchNormalizationTest(unittest.TestCase):
 
     @condition.retry(3)
     def test_forward_cpu(self):
-        self.check_forward(self.x)
+        if not self.use_gpu:
+            self.check_forward(self.x)
 
     @attr.gpu
     @condition.retry(3)
     def test_forward_gpu(self):
-        self.link.to_gpu()
-        self.check_forward(cuda.to_gpu(self.x))
+        if self.use_gpu:
+            self.link.to_gpu()
+            self.check_forward(cuda.to_gpu(self.x))
 
     @attr.cudnn
     def test_forward_gpu_without_cudnn(self):
@@ -93,11 +109,12 @@ class BatchNormalizationTest(unittest.TestCase):
     @attr.multi_gpu(2)
     @condition.retry(3)
     def test_forward_multi_gpu(self):
-        with cuda.get_device_from_id(1):
-            self.link.to_gpu()
-            x = cuda.to_gpu(self.x)
-        with cuda.get_device_from_id(0):
-            self.check_forward(x)
+        if self.use_gpu:
+            with cuda.get_device_from_id(1):
+                self.link.to_gpu()
+                x = cuda.to_gpu(self.x)
+            with cuda.get_device_from_id(0):
+                self.check_forward(x)
 
     def check_backward(self, x_data, y_grad):
         gradient_check.check_backward(
@@ -106,13 +123,15 @@ class BatchNormalizationTest(unittest.TestCase):
 
     @condition.retry(3)
     def test_backward_cpu(self):
-        self.check_backward(self.x, self.gy)
+        if not self.use_gpu:
+            self.check_backward(self.x, self.gy)
 
     @attr.gpu
     @condition.retry(3)
     def test_backward_gpu(self):
-        self.link.to_gpu()
-        self.check_backward(cuda.to_gpu(self.x), cuda.to_gpu(self.gy))
+        if self.use_gpu:
+            self.link.to_gpu()
+            self.check_backward(cuda.to_gpu(self.x), cuda.to_gpu(self.gy))
 
     @attr.cudnn
     def test_backward_gpu_without_cudnn(self):
