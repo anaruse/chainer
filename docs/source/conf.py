@@ -12,9 +12,10 @@
 # All configuration values have a default; values that are commented out
 # serve to show the default.
 
+import inspect
 import os
 import pkg_resources
-import shlex
+import six
 import sys
 
 
@@ -42,7 +43,7 @@ extensions = ['sphinx.ext.autodoc',
               'sphinx.ext.intersphinx',
               'sphinx.ext.mathjax',
               'sphinx.ext.napoleon',
-              'sphinx.ext.viewcode']
+              'sphinx.ext.linkcode']
 
 try:
     import sphinxcontrib.spelling  # noqa
@@ -322,7 +323,7 @@ autosummary_generate = True
 intersphinx_mapping = {
     'python': ('https://docs.python.org/3/', None),
     'numpy': ('http://docs.scipy.org/doc/numpy/', None),
-    'cupy': ('http://docs.cupy.chainer.org/en/latest/', None),
+    'cupy': ('https://docs-cupy.chainer.org/en/latest/', None),
 }
 
 doctest_global_setup = '''
@@ -340,3 +341,90 @@ np.random.seed(0)
 
 spelling_lang = 'en_US'
 spelling_word_list_filename = 'spelling_wordlist.txt'
+
+
+def _import_object_from_name(module_name, fullname):
+    obj = sys.modules.get(module_name)
+    if obj is None:
+        return None
+    for comp in fullname.split('.'):
+        obj = getattr(obj, comp)
+    return obj
+
+
+def _is_egg_directory(path):
+    return (path.endswith('.egg') and
+            os.path.isdir(os.path.join(path, 'EGG-INFO')))
+
+
+def _is_git_root(path):
+    return os.path.isdir(os.path.join(path, '.git'))
+
+
+_source_root = None
+
+
+def _find_source_root(source_abs_path):
+    # Note that READTHEDOCS* environment variable cannot be used, because they
+    # are not set under docker environment.
+    global _source_root
+    if _source_root is None:
+        dir = os.path.dirname(source_abs_path)
+        while True:
+            if _is_egg_directory(dir) or _is_git_root(dir):
+                # Reached the root directory
+                _source_root = dir
+                break
+
+            dir_ = os.path.dirname(dir)
+            if len(dir_) == len(dir):
+                raise RuntimeError('Couldn\'t parse root directory from '
+                                   'source file: {}'.format(source_abs_path))
+            dir = dir_
+    return _source_root
+
+
+def _get_source_relative_path(source_abs_path):
+    return os.path.relpath(source_abs_path, _find_source_root(source_abs_path))
+
+
+def linkcode_resolve(domain, info):
+    if domain != 'py' or not info['module']:
+        return None
+
+    rtd_version = os.environ.get('READTHEDOCS_VERSION')
+    if rtd_version == 'latest':
+        tag = 'master'
+    else:
+        tag = 'v{}'.format(__version__)
+
+    # Import the object from module path
+    obj = _import_object_from_name(info['module'], info['fullname'])
+
+    # If it's not defined in the internal module, return None.
+    mod = inspect.getmodule(obj)
+    if mod is None:
+        return None
+    if not (mod.__name__ == 'chainer' or mod.__name__.startswith('chainer.')):
+        return None
+
+    # Get the source file name and line number at which obj is defined.
+    try:
+        filename = inspect.getsourcefile(obj)
+    except TypeError:
+        # obj is not a module, class, function, ..etc.
+        return None
+
+    # inspect can return None for cython objects
+    if filename is None:
+        return None
+
+    # Get the source line number
+    _, linenum = inspect.getsourcelines(obj)
+    assert isinstance(linenum, six.integer_types)
+
+    filename = os.path.realpath(filename)
+    relpath = _get_source_relative_path(filename)
+
+    return 'https://github.com/chainer/chainer/blob/{}/{}#L{}'.format(
+        tag, relpath, linenum)

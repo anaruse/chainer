@@ -1,9 +1,9 @@
 """Device, context and memory management on CuPy.
 
-Chainer uses CuPy (with very thin wrapper) to exploit the speed of GPU
-computation. Following modules and classes are imported to :mod:`cuda`
-module for convenience (refer to this table when reading chainer's source
-codes).
+Chainer uses `CuPy <https://cupy.chainer.org/>`_ (with very thin wrapper)
+to exploit the speed of GPU computation. Following modules and classes defined
+in CuPy are imported to :mod:`chainer.cuda` module for convenience (refer to
+this table when reading chainer's source codes).
 
 ============================ =================================
  imported name                original name
@@ -74,7 +74,7 @@ def check_cuda_available():
     """
     if not available:
         msg = ('CUDA environment is not correctly set up\n'
-               '(see https://github.com/pfnet/chainer#installation).')
+               '(see https://github.com/chainer/chainer#installation).')
         msg += str(_resolution_error)
         raise RuntimeError(msg)
     if (not cudnn_enabled and
@@ -83,7 +83,7 @@ def check_cuda_available():
         warnings.warn(
             'cuDNN is not enabled.\n'
             'Please reinstall chainer after you install cudnn\n'
-            '(see https://github.com/pfnet/chainer#installation).')
+            '(see https://github.com/chainer/chainer#installation).')
         check_cuda_available._already_warned = True
 
 
@@ -325,7 +325,7 @@ def to_cpu(array, stream=None):
     """
     if isinstance(array, ndarray):
         check_cuda_available()
-        with get_device(array):
+        with get_device_from_array(array):
             return array.get(stream)
     elif isinstance(array, numpy.ndarray):
         return array
@@ -420,10 +420,10 @@ def copy(array, out=None, out_device=None, stream=None):
     if out is None:
         if out_device is None:
             out_device = array
-        with get_device(out_device):
+        with _get_device(out_device):
             out = cupy.empty_like(array)
 
-    with get_device(array):
+    with get_device_from_array(array):
         cupy.copyto(out, array)
 
     return out

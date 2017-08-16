@@ -22,6 +22,7 @@ set CHAINER_PYTHON_350_FORCE environment variable to 1."""
 setup_requires = []
 install_requires = [
     'filelock',
+    'mock',
     'nose',
     'numpy>=1.9.0',
     'protobuf>=2.6.0',
@@ -41,7 +42,7 @@ if cupy_pkg is not None:
 
 setup(
     name='chainer',
-    version='2.0.0',
+    version='2.0.2',
     description='A flexible framework of neural networks',
     author='Seiya Tokui',
     author_email='tokui@preferred.jp',

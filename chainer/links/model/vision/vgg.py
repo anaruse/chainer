@@ -67,8 +67,8 @@ class VGG16Layers(link.Chain):
             ``chainer.initializers.Normal(scale=0.01)``.
 
     Attributes:
-        available_layers (list of str): The list of available layer names
-            used by ``__call__`` and ``extract`` methods.
+        ~VGG16Layers.available_layers (list of str): The list of available
+            layer names used by ``__call__`` and ``extract`` methods.
 
     """
 
@@ -113,7 +113,9 @@ class VGG16Layers(link.Chain):
         elif pretrained_model:
             npz.load_npz(pretrained_model, self)
 
-        self.functions = collections.OrderedDict([
+    @property
+    def functions(self):
+        return collections.OrderedDict([
             ('conv1_1', [self.conv1_1, relu]),
             ('conv1_2', [self.conv1_2, relu]),
             ('pool1', [_max_pooling_2d]),

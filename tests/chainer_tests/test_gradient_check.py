@@ -54,7 +54,6 @@ class NumericalGradientTest(unittest.TestCase):
             return f(xs)
         dx_actual = gradient_check.numerical_grad(func, xs, gys, eps)
 
-        print('eps: {}'.format(eps))
         self.assertEqual(len(dx_expect), len(dx_actual))
         for e, a in zip(dx_expect, dx_actual):
             testing.assert_allclose(e, a, atol=1e-3, rtol=1e-3)
@@ -363,7 +362,7 @@ class TestCheckBackward(unittest.TestCase):
             s = Ident()(x)
             return s,
 
-        self.assertRaises(TypeError, gradient_check.check_backward,
+        self.assertRaises(RuntimeError, gradient_check.check_backward,
                           f, (x1, x2), g1, no_grads=[False, False])
         gradient_check.check_backward(f, (x1, x2), g1, no_grads=[False, True])
 

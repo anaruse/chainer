@@ -78,10 +78,13 @@ def variable_repr(var):
     else:
         prefix = 'variable'
 
-    if arr.size > 0 or arr.shape == (0,):
+    if arr is None:
+        lst = 'None'
+    elif arr.size > 0 or arr.shape == (0,):
         lst = numpy.array2string(arr, None, None, None, ', ', prefix + '(')
     else:  # show zero-length shape unless it is (0,)
         lst = '[], shape=%s' % (repr(arr.shape),)
+
     return '%s(%s)' % (prefix, lst)
 
 
@@ -97,12 +100,18 @@ def variable_str(var):
         arr = var.data
     else:
         arr = var.data.get()
+
     if var.name:
-        prefix = 'variable ' + var.name + '('
+        prefix = 'variable ' + var.name
     else:
-        prefix = 'variable('
-    return (prefix + numpy.array2string(arr, None, None, None, ' ', prefix) +
-            ')')
+        prefix = 'variable'
+
+    if arr is None:
+        lst = 'None'
+    else:
+        lst = numpy.array2string(arr, None, None, None, ' ', prefix + '(')
+
+    return '%s(%s)' % (prefix, lst)
 
 
 def _add_instance(instances, seen_set, instance):
@@ -158,9 +167,9 @@ class VariableNode(object):
         name (str): Name of the variable node.
 
     Attributes:
-        dtype: Data type of the data array.
-        shape: Shape of the data array.
-        name (str): Name of the variable node.
+        ~VariableNode.dtype: Data type of the data array.
+        ~VariableNode.shape: Shape of the data array.
+        ~VariableNode.name (str): Name of the variable node.
 
     """
 
@@ -753,7 +762,7 @@ def _create_variable(data, name, grad, requires_grad):
 
 class Variable(object):
 
-    """__init__(data=None, *, name=None, grad=None, initializer=None, update_rule=None, requires_grad=True)
+    """__init__(data=None, *, name=None, grad=None, requires_grad=True)
 
     Array with a structure to keep track of computation.
 
@@ -786,10 +795,10 @@ class Variable(object):
             in backward calculation.
 
     Attributes:
-        data: Data array of type either :class:`numpy.ndarray` or
+        ~Variable.data: Data array of type either :class:`numpy.ndarray` or
             :class:`cupy.ndarray`. If it is None, the variable is left in an
             uninitialized state.
-        grad: Gradient array.
+        ~Variable.grad: Gradient array.
         creator: The function who creates this variable. It is ``None`` if the
             variable is not created by any function.
 
@@ -995,8 +1004,8 @@ Actual: {0}'''.format(type(data))
 
         """
         if self.data is None:
-            current = cuda.Device().id
-            self._initial_device = current if device is None else device
+            self._initial_device = (cuda.Device().id
+                                    if device is None else device)
         else:
             self._data = [cuda.to_gpu(self.data, device, stream=stream)]
             # ensure that the node tracks the device migration
@@ -1031,7 +1040,7 @@ Actual: {0}'''.format(type(data))
 
         """
         warnings.warn(
-            'Variable.zerograd is deprecated. Use Variable.cleargard instead.',
+            'Variable.zerograd is deprecated. Use Variable.cleargrad instead.',
             DeprecationWarning)
 
         if self.data is None:
@@ -1338,7 +1347,7 @@ class Parameter(Variable):
 
     initializer = None
     _grad_initializer = None
-    _initial_device = -1
+    _initial_device = None
 
     def __init__(self, initializer=None, shape=None, name=None):
         if initializer is None:
@@ -1378,7 +1387,7 @@ class Parameter(Variable):
     def to_cpu(self):
         super(Parameter, self).to_cpu()
         if self.data is None:
-            self._initial_device = -1
+            self._initial_device = None
 
     def to_gpu(self, device=None):
         super(Parameter, self).to_gpu(device)
@@ -1409,16 +1418,13 @@ class Parameter(Variable):
             shape (tuple of int): Shape of the data array.
 
         """
-        data = initializers.generate_array(self.initializer, shape, numpy)
+        xp = numpy if self._initial_device is None else cuda.cupy
+        with cuda.get_device_from_id(self._initial_device):
+            data = initializers.generate_array(self.initializer, shape, xp)
 
-        ginit = self._grad_initializer
-        grad = None if ginit is None else initializers.generate_array(
-            ginit, shape, numpy)
-
-        if self._initial_device >= 0:
-            data = cuda.to_gpu(data, device=self._initial_device)
-            if grad is not None:
-                grad = cuda.to_gpu(grad, device=self._initial_device)
+            ginit = self._grad_initializer
+            grad = None if ginit is None else initializers.generate_array(
+                ginit, shape, xp)
 
         self._data[0] = data
         self._node._grad = grad
