@@ -10,6 +10,9 @@ from chainer import link as link_module
 from chainer import serializer as serializer_module
 from chainer import variable
 
+import cupy
+from cupy import prof
+
 
 def _sum_sqnorm(arr):
     sq_sum = collections.defaultdict(float)
@@ -533,21 +536,28 @@ class GradientMethod(Optimizer):
         """
         if lossfun is not None:
             use_cleargrads = getattr(self, '_use_cleargrads', True)
-            loss = lossfun(*args, **kwds)
+            
+            with cupy.prof.time_range('forward', color_id=5, sync=True):
+                loss = lossfun(*args, **kwds)
+            
             if use_cleargrads:
                 self.target.cleargrads()
             else:
                 self.target.zerograds()
-            loss.backward()
+                
+            with cupy.prof.time_range('backward', color_id=6, sync=True):
+                loss.backward()
+            
             del loss
 
         self.reallocate_cleared_grads()
 
         self.call_hooks()
 
-        self.t += 1
-        for param in self.target.params():
-            param.update()
+        with cupy.prof.time_range('update', color_id=7, sync=True):
+            self.t += 1
+            for param in self.target.params():
+                param.update()
 
     def use_cleargrads(self, use=True):
         """Enables or disables use of :func:`~chainer.Link.cleargrads` in `update`.

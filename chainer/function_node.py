@@ -13,6 +13,18 @@ from chainer import function_hook
 from chainer.utils import type_check
 from chainer import variable
 
+import cupy
+from cupy import prof
+
+import inspect
+import os
+
+
+def _loc():
+    frame = inspect.currentframe().f_back
+    ret = '%s, %s, %s' % (os.path.basename(frame.f_code.co_filename), frame.f_code.co_name, frame.f_lineno)
+    return ret
+
 
 class FunctionNode(object):
 

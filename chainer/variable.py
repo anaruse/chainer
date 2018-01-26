@@ -13,6 +13,18 @@ from chainer import initializers
 from chainer.initializers import constant
 from chainer.utils import argument
 
+import cupy
+from cupy import prof
+
+import inspect
+import os
+
+
+def _loc():
+    frame = inspect.currentframe().f_back
+    ret = '%s, %s, %s' % (os.path.basename(frame.f_code.co_filename), frame.f_code.co_name, frame.f_lineno)
+    return ret
+
 
 def _check_grad_type(func, x, gx):
     if x.data is None or gx is None:
@@ -932,6 +944,7 @@ Actual: {0}'''.format(type(data))
 
         while cand_funcs:
             _, _, func = heapq.heappop(cand_funcs)
+            # print('# {}, func:{}'.format(_loc(), func))
             inputs = func.inputs
             target_input_indexes = [
                 i for i, x in enumerate(inputs) if x.requires_grad
@@ -986,8 +999,10 @@ Actual: {0}'''.format(type(data))
                     gx = None
                 in_grad.append(gx)
 
+            # print('# {}, target_input_indexes:{}'.format(_loc(), target_input_indexes))
             gxs = func.backward_accumulate(
                 target_input_indexes, out_grad, in_grad)
+            # print('# {}, len(gxs):{}'.format(_loc(), len(gxs)))
 
             assert len(gxs) == len(in_grad)
             for hook in hooks:
