@@ -71,6 +71,11 @@ class BatchNormalization(function_node.FunctionNode):
             expander = (None, Ellipsis) + (None,) * (x.ndim - head_ndim)
             self.axis = (0,) + tuple(range(head_ndim, x.ndim))
             self.use_cudnn = self.mode.can_use_cudnn(xp)
+        elif (x.ndim == 3) and (len(self.axis) == 2) and (0 in self.axis) and (1 in self.axis):
+            expander = (None, Ellipsis, None, None)
+            self.axis = (0, 2, 3)
+            self.use_cudnn = True
+            self.mode.cudnn_dim_ok = True
         else:
             expander = [None if i in self.axis else Ellipsis for i in range(x.ndim)]
             self.use_cudnn = False
@@ -86,11 +91,11 @@ class BatchNormalization(function_node.FunctionNode):
             handle = cudnn.get_handle()
             
             _x = _as4darray(x)
-            print('# BN:forward: _x.shape:{}'.format(_x.shape))
+            # print('# BN:forward: _x.shape:{}'.format(_x.shape))
             x_desc = cudnn.create_tensor_descriptor(_x)
             derivedBnDesc = cudnn.create_uninitialized_tensor_descriptor()
-            cudnn_mode = self.mode.get_cudnn_mode()
-            print('# BN:forward: cudnn_mode:{}'.format(cudnn_mode))
+            cudnn_mode = self.mode.get_cudnn_mode(_x.shape)
+            # print('# BN:forward: cudnn_mode:{}'.format(cudnn_mode))
             libcudnn.deriveBNTensorDescriptor(derivedBnDesc.value,
                                               x_desc.value, cudnn_mode)
             one = numpy.array(1, dtype=dtype).ctypes
@@ -165,8 +170,6 @@ class BatchNormalizationGrad(function.Function):
         xp = cuda.get_array_module(x)
 
         if self.use_cudnn:
-            cudnn_mode = self.mode.get_cudnn_mode()
-            print('# BNGrad:forward: cudnn_mode:{}'.format(cudnn_mode))
             x = cuda.cupy.ascontiguousarray(x)
             gamma = cuda.cupy.ascontiguousarray(gamma)
             gy = cuda.cupy.ascontiguousarray(gy)
@@ -174,8 +177,10 @@ class BatchNormalizationGrad(function.Function):
             handle = cudnn.get_handle()
             
             _x = _as4darray(x)
-            print('# BNGrad:forward: _x.shape:{}'.format(_x.shape))
+            # print('# BNGrad:forward: _x.shape:{}'.format(_x.shape))
             x_desc = cudnn.create_tensor_descriptor(_x)
+            cudnn_mode = self.mode.get_cudnn_mode(_x.shape)
+            # print('# BNGrad:forward: cudnn_mode:{}'.format(cudnn_mode))
             derivedBnDesc = cudnn.create_uninitialized_tensor_descriptor()
             libcudnn.deriveBNTensorDescriptor(derivedBnDesc.value,
                                               x_desc.value, cudnn_mode)
@@ -304,6 +309,11 @@ class FixedBatchNormalization(function_node.FunctionNode):
             expander = (None, Ellipsis) + (None,) * (x.ndim - head_ndim)
             self.axis = (0,) + tuple(range(head_ndim, x.ndim))
             use_cudnn = mode.can_use_cudnn(xp)
+        elif (x.ndim == 3) and (len(self.axis) == 2) and (0 in self.axis) and (1 in self.axis):
+            expander = (None, Ellipsis, None, None)
+            self.axis = (0, 2, 3)
+            use_cudnn = True
+            mode.cudnn_dim_ok = True
         else:
             expander = [None if i in self.axis else Ellipsis for i in range(x.ndim)]
             use_cudnn = False
@@ -316,9 +326,10 @@ class FixedBatchNormalization(function_node.FunctionNode):
             beta = cuda.cupy.ascontiguousarray(beta)
             dtype = x.dtype
             handle = cudnn.get_handle()
-            x_desc = cudnn.create_tensor_descriptor(_as4darray(x))
+            _x = _as4darray(x)
+            x_desc = cudnn.create_tensor_descriptor(_x)
             derivedBnDesc = cudnn.create_uninitialized_tensor_descriptor()
-            cudnn_mode = mode.get_cudnn_mode()
+            cudnn_mode = mode.get_cudnn_mode(_x.shape)
             libcudnn.deriveBNTensorDescriptor(derivedBnDesc.value,
                                               x_desc.value, cudnn_mode)
             one = numpy.array(1, dtype=dtype).ctypes
@@ -435,9 +446,12 @@ class _BNMode(object):
         self.cudnn_dim_ok = self.is_for_conv2d or self.is_for_linear
         self.cudnn_dtype_ok = x.dtype != numpy.float16
 
-    def get_cudnn_mode(self):
+    def get_cudnn_mode(self, x_shape=None):
         assert self.cudnn_dim_ok
+        # print('# _BNMode: x_shape:{}'.format(x_shape))
         if self.is_for_conv2d:
+            return libcudnn.CUDNN_BATCHNORM_SPATIAL
+        if x_shape[2] == 1 and x_shape[3] == 1:  # testing
             return libcudnn.CUDNN_BATCHNORM_SPATIAL
         return libcudnn.CUDNN_BATCHNORM_PER_ACTIVATION
 
@@ -455,6 +469,8 @@ def _as4darray(arr):
         return arr.reshape(1, 1, 1, 1)
     elif arr.ndim == 4:
         return arr
+    elif arr.ndim == 3:
+        return arr.reshape(arr.shape[0] * arr.shape[1], arr.shape[2], 1, 1)
     else:
         return arr.reshape(arr.shape[0], -1, 1, 1)
 
