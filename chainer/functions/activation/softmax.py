@@ -26,7 +26,7 @@ def _get_cudnn_mode(shape):
     mode = _mode_channel
     if shape[2] == 1 and shape[3] == 1:
         mode = _mode_instance
-    print('# softmax: shape:{}, mode:{}'.format(shape, mode))
+    # print('# softmax: shape:{}, mode:{}'.format(shape, mode))
     return mode
 
 

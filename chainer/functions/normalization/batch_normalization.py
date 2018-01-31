@@ -17,7 +17,7 @@ class BatchNormalization(function_node.FunctionNode):
     mean = None
     inv_std = None
 
-    def __init__(self, eps=2e-5, mean=None, var=None, decay=0.9):
+    def __init__(self, eps=2e-5, mean=None, var=None, decay=0.9, axes=None):
         self.running_mean = mean
         self.running_var = var
 
@@ -31,20 +31,29 @@ class BatchNormalization(function_node.FunctionNode):
                 msg = 'cuDNN does not allow an eps value less than 1e-5.'
                 raise RuntimeError(msg)
         self.decay = decay
+        self.axes = axes
 
     def check_type_forward(self, in_types):
         type_check.expect(in_types.size() == 3)
         x_type, gamma_type, beta_type = in_types
         M = type_check.eval(gamma_type.ndim)
-        type_check.expect(
-            x_type.dtype.kind == 'f',
-            x_type.ndim >= gamma_type.ndim + 1,
-            x_type.shape[1:1 + M] == gamma_type.shape,
-            # TODO(beam2d): Check shape
-            gamma_type.dtype == x_type.dtype,
-            beta_type.dtype == x_type.dtype,
-            gamma_type.shape == beta_type.shape,
-        )
+        if self.axes is None:
+            type_check.expect(
+                x_type.dtype.kind == 'f',
+                x_type.ndim >= gamma_type.ndim + 1,
+                x_type.shape[1:1 + M] == gamma_type.shape,
+                # TODO(beam2d): Check shape
+                gamma_type.dtype == x_type.dtype,
+                beta_type.dtype == x_type.dtype,
+                gamma_type.shape == beta_type.shape,
+            )
+        else:
+            type_check.expect(
+                x_type.dtype.kind == 'f',
+                gamma_type.dtype == x_type.dtype,
+                beta_type.dtype == x_type.dtype,
+                gamma_type.shape == beta_type.shape,
+            )
 
     def forward(self, inputs):
         self.retain_inputs((0, 1))
@@ -57,11 +66,17 @@ class BatchNormalization(function_node.FunctionNode):
 
         # expander inserts singleton dimensions to gamma and beta so that they
         # can be broadcasted with x.
-        head_ndim = gamma.ndim + 1
-        expander = (None, Ellipsis) + (None,) * (x.ndim - head_ndim)
+        if self.axes is None:
+            head_ndim = gamma.ndim + 1
+            expander = (None, Ellipsis) + (None,) * (x.ndim - head_ndim)
+            self.axis = (0,) + tuple(range(head_ndim, x.ndim))
+            self.use_cudnn = self.mode.can_use_cudnn(xp)
+        else:
+            expander = [None if i in self.axes else Ellipsis for i in range(x.ndim)]
+            self.axis = self.axes
+            self.use_cudnn = False
         self.expander = expander
-        self.axis = (0,) + tuple(range(head_ndim, x.ndim))
-        self.use_cudnn = self.mode.can_use_cudnn(xp)
+        # print('# BN:forward: axis:{}, expander:{}'.format(self.axis, self.expander))
 
         if self.use_cudnn:
             x = cuda.cupy.ascontiguousarray(x)
@@ -242,41 +257,61 @@ class FixedBatchNormalization(function_node.FunctionNode):
     inv_std = None
     inv_var = None
 
-    def __init__(self, eps=2e-5):
+    def __init__(self, eps=2e-5, axes=None):
         self.eps = eps
+        self.axes = axes
 
     def check_type_forward(self, in_types):
         type_check.expect(in_types.size() == 5)
         x_type, gamma_type, beta_type, mean_type, var_type = in_types
         M = type_check.eval(gamma_type.ndim)
-        type_check.expect(
-            x_type.dtype.kind == 'f',
-            x_type.ndim >= gamma_type.ndim + 1,
-            x_type.shape[1:1 + M] == gamma_type.shape,
-            # TODO(beam2d): Check shape
-            gamma_type.dtype == x_type.dtype,
-            beta_type.dtype == x_type.dtype,
-            gamma_type.shape == beta_type.shape,
-            mean_type.dtype == x_type.dtype,
-            mean_type.shape == gamma_type.shape,
-            var_type.dtype == x_type.dtype,
-            var_type.shape == gamma_type.shape,
-        )
+        if self.axes is None:
+            type_check.expect(
+                x_type.dtype.kind == 'f',
+                x_type.ndim >= gamma_type.ndim + 1,
+                x_type.shape[1:1 + M] == gamma_type.shape,
+                # TODO(beam2d): Check shape
+                gamma_type.dtype == x_type.dtype,
+                beta_type.dtype == x_type.dtype,
+                gamma_type.shape == beta_type.shape,
+                mean_type.dtype == x_type.dtype,
+                mean_type.shape == gamma_type.shape,
+                var_type.dtype == x_type.dtype,
+                var_type.shape == gamma_type.shape,
+            )
+        else:
+            type_check.expect(
+                x_type.dtype.kind == 'f',
+                # TODO(beam2d): Check shape
+                gamma_type.dtype == x_type.dtype,
+                beta_type.dtype == x_type.dtype,
+                gamma_type.shape == beta_type.shape,
+                mean_type.dtype == x_type.dtype,
+                mean_type.shape == gamma_type.shape,
+                var_type.dtype == x_type.dtype,
+                var_type.shape == gamma_type.shape,
+            )
 
     def forward(self, inputs):
         self.retain_inputs((0, 1, 3, 4))
         x, gamma, beta, mean, var = inputs
         xp = cuda.get_array_module(x)
+        mode = _BNMode(x, gamma)
 
         # expander inserts singleton dimensions to gamma and beta so that they
         # can be broadcasted with x.
-        head_ndim = gamma.ndim + 1
-        expander = (None, Ellipsis) + (None,) * (x.ndim - head_ndim)
+        if self.axes is None:
+            head_ndim = gamma.ndim + 1
+            expander = (None, Ellipsis) + (None,) * (x.ndim - head_ndim)
+            self.axis = (0,) + tuple(range(head_ndim, x.ndim))
+            use_cudnn = mode.can_use_cudnn(xp)
+        else:
+            expander = [None if i in self.axes else Ellipsis for i in range(x.ndim)]
+            self.axis = self.axes
+            use_cudnn = False
         self.expander = expander
-        self.axis = (0,) + tuple(range(head_ndim, x.ndim))
-
-        mode = _BNMode(x, gamma)
-        if mode.can_use_cudnn(xp):
+            
+        if use_cudnn:
             x = cuda.cupy.ascontiguousarray(x)
 
             gamma = cuda.cupy.ascontiguousarray(gamma)
@@ -530,15 +565,15 @@ def batch_normalization(x, gamma, beta, **kwargs):
     argument.check_unexpected_kwargs(
         kwargs, train='train argument is not supported anymore. '
         'Use chainer.using_config')
-    eps, running_mean, running_var, decay = argument.parse_kwargs(
+    eps, running_mean, running_var, decay, axes = argument.parse_kwargs(
         kwargs, ('eps', 2e-5), ('running_mean', None),
-        ('running_var', None), ('decay', 0.9))
+        ('running_var', None), ('decay', 0.9), ('axes', None))
 
-    return BatchNormalization(eps, running_mean, running_var, decay).apply(
-        (x, gamma, beta))[0]
+    return BatchNormalization(eps, running_mean, running_var,
+                              decay, axes).apply((x, gamma, beta))[0]
 
 
-def fixed_batch_normalization(x, gamma, beta, mean, var, eps=2e-5):
+def fixed_batch_normalization(x, gamma, beta, mean, var, eps=2e-5, axes=None):
     """Batch normalization function with fixed statistics.
 
     This is a variant of batch normalization, where the mean and variance
@@ -559,4 +594,4 @@ def fixed_batch_normalization(x, gamma, beta, mean, var, eps=2e-5):
        :class:`links.BatchNormalization`
 
     """
-    return FixedBatchNormalization(eps).apply((x, gamma, beta, mean, var))[0]
+    return FixedBatchNormalization(eps, axes).apply((x, gamma, beta, mean, var))[0]
