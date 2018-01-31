@@ -64,7 +64,7 @@ class BatchNormalization(link.Link):
 
     def __init__(self, size, decay=0.9, eps=2e-5, dtype=numpy.float32,
                  use_gamma=True, use_beta=True,
-                 initial_gamma=None, initial_beta=None, axes=None):
+                 initial_gamma=None, initial_beta=None, axis=None):
         super(BatchNormalization, self).__init__()
         self.avg_mean = numpy.zeros(size, dtype=dtype)
         self.register_persistent('avg_mean')
@@ -74,7 +74,7 @@ class BatchNormalization(link.Link):
         self.register_persistent('N')
         self.decay = decay
         self.eps = eps
-        self.axes = axes
+        self.axis = axis
 
         with self.init_scope():
             if use_gamma:
@@ -142,13 +142,13 @@ class BatchNormalization(link.Link):
 
             ret = functions.batch_normalization(
                 x, gamma, beta, eps=self.eps, running_mean=self.avg_mean,
-                running_var=self.avg_var, decay=decay, axes=self.axes)
+                running_var=self.avg_var, decay=decay, axis=self.axis)
         else:
             # Use running average statistics or fine-tuned statistics.
             mean = variable.Variable(self.avg_mean)
             var = variable.Variable(self.avg_var)
             ret = functions.fixed_batch_normalization(
-                x, gamma, beta, mean, var, self.eps, axes=self.axes)
+                x, gamma, beta, mean, var, self.eps, axis=self.axis)
         return ret
 
     def start_finetuning(self):

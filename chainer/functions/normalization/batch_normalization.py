@@ -17,7 +17,7 @@ class BatchNormalization(function_node.FunctionNode):
     mean = None
     inv_std = None
 
-    def __init__(self, eps=2e-5, mean=None, var=None, decay=0.9, axes=None):
+    def __init__(self, eps=2e-5, mean=None, var=None, decay=0.9, axis=None):
         self.running_mean = mean
         self.running_var = var
 
@@ -31,13 +31,13 @@ class BatchNormalization(function_node.FunctionNode):
                 msg = 'cuDNN does not allow an eps value less than 1e-5.'
                 raise RuntimeError(msg)
         self.decay = decay
-        self.axes = axes
+        self.axis = axis
 
     def check_type_forward(self, in_types):
         type_check.expect(in_types.size() == 3)
         x_type, gamma_type, beta_type = in_types
         M = type_check.eval(gamma_type.ndim)
-        if self.axes is None:
+        if self.axis is None:
             type_check.expect(
                 x_type.dtype.kind == 'f',
                 x_type.ndim >= gamma_type.ndim + 1,
@@ -66,14 +66,13 @@ class BatchNormalization(function_node.FunctionNode):
 
         # expander inserts singleton dimensions to gamma and beta so that they
         # can be broadcasted with x.
-        if self.axes is None:
+        if self.axis is None:
             head_ndim = gamma.ndim + 1
             expander = (None, Ellipsis) + (None,) * (x.ndim - head_ndim)
             self.axis = (0,) + tuple(range(head_ndim, x.ndim))
             self.use_cudnn = self.mode.can_use_cudnn(xp)
         else:
-            expander = [None if i in self.axes else Ellipsis for i in range(x.ndim)]
-            self.axis = self.axes
+            expander = [None if i in self.axis else Ellipsis for i in range(x.ndim)]
             self.use_cudnn = False
         self.expander = expander
         # print('# BN:forward: axis:{}, expander:{}'.format(self.axis, self.expander))
@@ -257,15 +256,15 @@ class FixedBatchNormalization(function_node.FunctionNode):
     inv_std = None
     inv_var = None
 
-    def __init__(self, eps=2e-5, axes=None):
+    def __init__(self, eps=2e-5, axis=None):
         self.eps = eps
-        self.axes = axes
+        self.axis = axis
 
     def check_type_forward(self, in_types):
         type_check.expect(in_types.size() == 5)
         x_type, gamma_type, beta_type, mean_type, var_type = in_types
         M = type_check.eval(gamma_type.ndim)
-        if self.axes is None:
+        if self.axis is None:
             type_check.expect(
                 x_type.dtype.kind == 'f',
                 x_type.ndim >= gamma_type.ndim + 1,
@@ -300,14 +299,13 @@ class FixedBatchNormalization(function_node.FunctionNode):
 
         # expander inserts singleton dimensions to gamma and beta so that they
         # can be broadcasted with x.
-        if self.axes is None:
+        if self.axis is None:
             head_ndim = gamma.ndim + 1
             expander = (None, Ellipsis) + (None,) * (x.ndim - head_ndim)
             self.axis = (0,) + tuple(range(head_ndim, x.ndim))
             use_cudnn = mode.can_use_cudnn(xp)
         else:
-            expander = [None if i in self.axes else Ellipsis for i in range(x.ndim)]
-            self.axis = self.axes
+            expander = [None if i in self.axis else Ellipsis for i in range(x.ndim)]
             use_cudnn = False
         self.expander = expander
             
@@ -565,15 +563,15 @@ def batch_normalization(x, gamma, beta, **kwargs):
     argument.check_unexpected_kwargs(
         kwargs, train='train argument is not supported anymore. '
         'Use chainer.using_config')
-    eps, running_mean, running_var, decay, axes = argument.parse_kwargs(
+    eps, running_mean, running_var, decay, axis = argument.parse_kwargs(
         kwargs, ('eps', 2e-5), ('running_mean', None),
-        ('running_var', None), ('decay', 0.9), ('axes', None))
+        ('running_var', None), ('decay', 0.9), ('axis', None))
 
     return BatchNormalization(eps, running_mean, running_var,
-                              decay, axes).apply((x, gamma, beta))[0]
+                              decay, axis).apply((x, gamma, beta))[0]
 
 
-def fixed_batch_normalization(x, gamma, beta, mean, var, eps=2e-5, axes=None):
+def fixed_batch_normalization(x, gamma, beta, mean, var, eps=2e-5, axis=None):
     """Batch normalization function with fixed statistics.
 
     This is a variant of batch normalization, where the mean and variance
@@ -594,4 +592,4 @@ def fixed_batch_normalization(x, gamma, beta, mean, var, eps=2e-5, axes=None):
        :class:`links.BatchNormalization`
 
     """
-    return FixedBatchNormalization(eps, axes).apply((x, gamma, beta, mean, var))[0]
+    return FixedBatchNormalization(eps, axis).apply((x, gamma, beta, mean, var))[0]
