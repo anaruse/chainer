@@ -7,7 +7,11 @@ from chainer import function_node
 from chainer import utils
 from chainer.utils import type_check
 
+import cupy
+from cupy import prof
 
+
+@cupy.prof.TimeRangeDecorator('_tensordot', color_id=0, sync=True)
 def _tensordot(a, b, a_axes, b_axes, c_axes):
 
     a_row_ndim = len(a_axes[0])
@@ -77,6 +81,7 @@ class TensorDot(function_node.FunctionNode):
             b_type.ndim >= 1,
         )
 
+    @cupy.prof.TimeRangeDecorator('TD:FWD', color_id=1, sync=True)
     def forward(self, inputs):
         self.retain_inputs((0, 1))
         a, b = inputs
@@ -112,6 +117,7 @@ class TensorDot(function_node.FunctionNode):
         c = _tensordot(a, b, self.a_axes, self.b_axes, self.c_axes)
         return utils.force_array(c),
 
+    @cupy.prof.TimeRangeDecorator('TD:BWD', color_id=2, sync=True)
     def backward(self, indexes, grad_outputs):
         a, b = self.get_retained_inputs()
         gc, = grad_outputs
@@ -120,13 +126,15 @@ class TensorDot(function_node.FunctionNode):
             ga, = TensorDot(a_axes=self.c_axes,
                             b_axes=[self.b_axes[1], self.b_axes[0]],
                             c_axes=self.a_axes).apply((gc, b))
-            ga.array = ga.array.astype(a.dtype)
+            if ga.dtype != a.dtype:
+                ga.array = ga.array.astype(a.dtype)
 
         if 1 in indexes:
             gb, = TensorDot(a_axes=[self.a_axes[1], self.a_axes[0]],
                             b_axes=self.c_axes,
                             c_axes=self.b_axes).apply((a, gc))
-            gb.array = gb.array.astype(b.dtype)
+            if ga.dtype != b.dtype:
+                gb.array = gb.array.astype(b.dtype)
 
         return ga, gb
 

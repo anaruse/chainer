@@ -60,12 +60,13 @@ def _matmul(a, b, transa=False, transb=False, transout=False):
     xp = cuda.get_array_module(a)
 
     if hasattr(xp, 'matmul'):  # numpy.matmul is supported from version 1.10.0
-        return xp.matmul(a, b)
-    if a.ndim <= 2:
-        return numpy.dot(a, b)
+        with cupy.prof.time_range('xp.matmul', color_id=0, sync=True):
+            ret = xp.matmul(a, b)
+    elif a.ndim <= 2:
+        ret = numpy.dot(a, b)
     else:
-        return numpy.einsum('...ij,...jk->...ik', a, b)
-
+        ret = numpy.einsum('...ij,...jk->...ik', a, b)
+    return ret
 
 def _check_ndim(in_type, lower=1, upper=2):
     type_check.expect(
@@ -136,13 +137,15 @@ class MatMul(function_node.FunctionNode):
         if 0 in indexes:
             ga, = MatMul(self.transc, not self.transb,
                          self.transa).apply((gy, b))
-            ga.data = ga.data.astype(a.dtype)
+            if ga.dtype != a.dtype:
+                ga.array = ga.array.astype(a.dtype)
                 
         gb = None
         if 1 in indexes:
             gb, = MatMul(not self.transa, self.transc,
                          self.transb).apply((a, gy))
-            gb.data = gb.data.astype(b.dtype)
+            if gb.dtype != b.dtype:
+                gb.array = gb.array.astype(b.dtype)
 
         return ga, gb
 

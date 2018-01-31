@@ -70,9 +70,13 @@ class BatchNormalization(function_node.FunctionNode):
             beta = cuda.cupy.ascontiguousarray(beta)
             dtype = x.dtype
             handle = cudnn.get_handle()
-            x_desc = cudnn.create_tensor_descriptor(_as4darray(x))
+            
+            _x = _as4darray(x)
+            print('# BN:forward: _x.shape:{}'.format(_x.shape))
+            x_desc = cudnn.create_tensor_descriptor(_x)
             derivedBnDesc = cudnn.create_uninitialized_tensor_descriptor()
             cudnn_mode = self.mode.get_cudnn_mode()
+            print('# BN:forward: cudnn_mode:{}'.format(cudnn_mode))
             libcudnn.deriveBNTensorDescriptor(derivedBnDesc.value,
                                               x_desc.value, cudnn_mode)
             one = numpy.array(1, dtype=dtype).ctypes
@@ -148,12 +152,16 @@ class BatchNormalizationGrad(function.Function):
 
         if self.use_cudnn:
             cudnn_mode = self.mode.get_cudnn_mode()
+            print('# BNGrad:forward: cudnn_mode:{}'.format(cudnn_mode))
             x = cuda.cupy.ascontiguousarray(x)
             gamma = cuda.cupy.ascontiguousarray(gamma)
             gy = cuda.cupy.ascontiguousarray(gy)
             dtype = x.dtype
             handle = cudnn.get_handle()
-            x_desc = cudnn.create_tensor_descriptor(_as4darray(x))
+            
+            _x = _as4darray(x)
+            print('# BNGrad:forward: _x.shape:{}'.format(_x.shape))
+            x_desc = cudnn.create_tensor_descriptor(_x)
             derivedBnDesc = cudnn.create_uninitialized_tensor_descriptor()
             libcudnn.deriveBNTensorDescriptor(derivedBnDesc.value,
                                               x_desc.value, cudnn_mode)

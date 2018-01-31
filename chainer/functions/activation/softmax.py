@@ -11,6 +11,7 @@ if cuda.cudnn_enabled:
     libcudnn = cuda.cuda.cudnn
     _algorithm = libcudnn.CUDNN_SOFTMAX_ACCURATE
     _mode = libcudnn.CUDNN_SOFTMAX_MODE_CHANNEL
+    _mode_instance = libcudnn.CUDNN_SOFTMAX_MODE_INSTANCE
 
 
 def _get_tensor4d_shape(axis, shape):
@@ -39,18 +40,26 @@ class Softmax(function_node.FunctionNode):
         )
 
     def forward(self, x):
-        xp = cuda.get_array_module(*x)
+        # xp = cuda.get_array_module(*x)
+        xp = cuda.get_array_module(x[0])
         if xp is not numpy and chainer.should_use_cudnn('>=auto'):
             oz_dtype = 'd' if x[0].dtype == 'd' else 'f'
             one = numpy.array(1, dtype=oz_dtype).ctypes
             zero = numpy.array(0, dtype=oz_dtype).ctypes
             handle = cudnn.get_handle()
+
+            _cudnn_mode = _mode
+            _shape = _get_tensor4d_shape(self.axis, x[0].shape)
+            if _shape[2] == 1 and _shape[3] == 1:
+                _cudnn_mode = _mode_instance
+                print('# Softmax:forward, _shape:{}'.format(_shape))
+            
             x_tensor4d = cuda.cupy.ascontiguousarray(
-                x[0].reshape(_get_tensor4d_shape(self.axis, x[0].shape)))
+                x[0].reshape(_shape))
             desc = cudnn.create_tensor_descriptor(x_tensor4d)
             y = xp.empty_like(x[0])
             libcudnn.softmaxForward(
-                handle, _algorithm, _mode, one.data, desc.value,
+                handle, _algorithm, _cudnn_mode, one.data, desc.value,
                 x_tensor4d.data.ptr, zero.data, desc.value,
                 y.data.ptr)
         else:
@@ -75,19 +84,28 @@ class _SoftmaxGrad(function_node.FunctionNode):
     def forward(self, inputs):
         self.retain_inputs((0, 1))
         y, gy = inputs
-        xp = cuda.get_array_module(*y)
+        # xp = cuda.get_array_module(*y)
+        xp = cuda.get_array_module(y)
         if xp is not numpy and chainer.should_use_cudnn('>=auto'):
             oz_dtype = 'd' if y[0].dtype == 'd' else 'f'
             one = numpy.array(1, dtype=oz_dtype).ctypes
             zero = numpy.array(0, dtype=oz_dtype).ctypes
             handle = cudnn.get_handle()
             gx = xp.empty_like(y)
+            
+            _cudnn_mode = _mode
+            _shape = _get_tensor4d_shape(self.axis, gx.shape)
+            if _shape[2] == 1 and _shape[3] == 1:
+                _cudnn_mode = _mode_instance
+                print('# SoftmaxGrad:forward, _shape:{}'.format(_shape))
+            
             gx_tensor4d = cuda.cupy.ascontiguousarray(
-                gx.reshape(_get_tensor4d_shape(self.axis, gx.shape)))
+                gx.reshape(_shape))
+            
             gy = cuda.cupy.ascontiguousarray(gy)
             desc = cudnn.create_tensor_descriptor(gx_tensor4d)
             libcudnn.softmaxBackward(
-                handle, _algorithm, _mode, one.data, desc.value,
+                handle, _algorithm, _cudnn_mode, one.data, desc.value,
                 y.data.ptr, desc.value, gy.data.ptr, zero.data,
                 desc.value, gx.data.ptr)
         else:
