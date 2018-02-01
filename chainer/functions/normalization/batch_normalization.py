@@ -32,6 +32,12 @@ class BatchNormalization(function_node.FunctionNode):
                 msg = 'cuDNN does not allow an eps value less than 1e-5.'
                 raise RuntimeError(msg)
         self.decay = decay
+        if isinstance(key_axis, collections.Sequence):
+            pass
+        elif isinstance(key_axis, int):
+            key_axis = key_axis,
+        elif key_axis is not None:
+            raise RuntimeError('key_axis must be int, tuple of int or None')
         self.key_axis = key_axis
 
     def check_type_forward(self, in_types):
@@ -54,8 +60,9 @@ class BatchNormalization(function_node.FunctionNode):
                 gamma_type.dtype == x_type.dtype,
                 beta_type.dtype == x_type.dtype,
                 gamma_type.shape == beta_type.shape,
-                x_type.ndim > self.key_axis,
-                x_type.shape[self.key_axis] == gamma_type.shape[0],
+                x_type.ndim > len(self.key_axis),
+                # shape check is not complete...
+                x_type.shape[self.key_axis[0]] == gamma_type.shape[0],
             )
 
     def forward(self, inputs):
@@ -67,11 +74,7 @@ class BatchNormalization(function_node.FunctionNode):
             self.running_var = xp.zeros_like(gamma)
         # print('# BN:forward: x.shape:{}, gamma.shape:{}'.format(x.shape, gamma.shape))
 
-        if isinstance(self.key_axis, collections.Sequence):
-            pass
-        elif isinstance(self.key_axis, int):
-            self.key_axis = self.key_axis,
-        elif self.key_axis is None:
+        if self.key_axis is None:
             self.key_axis = [i+1 for i in range(gamma.ndim)]
         # print('# BN:forward: key_axis:{}'.format(self.key_axis))
         
@@ -271,6 +274,12 @@ class FixedBatchNormalization(function_node.FunctionNode):
 
     def __init__(self, eps=2e-5, key_axis=None):
         self.eps = eps
+        if isinstance(key_axis, collections.Sequence):
+            pass
+        elif isinstance(key_axis, int):
+            key_axis = key_axis,
+        elif key_axis is not None:
+            raise RuntimeError('key_axis must be int, tuple of int or None')
         self.key_axis = key_axis
 
     def check_type_forward(self, in_types):
@@ -309,11 +318,7 @@ class FixedBatchNormalization(function_node.FunctionNode):
         x, gamma, beta, mean, var = inputs
         xp = cuda.get_array_module(x)
 
-        if isinstance(self.key_axis, collections.Sequence):
-            pass
-        elif isinstance(self.key_axis, int):
-            self.key_axis = self.key_axis,
-        elif self.key_axis is None:
+        if self.key_axis is None:
             self.key_axis = [i+1 for i in range(gamma.ndim)]
         # print('# FBN:forward: key_axis:{}'.format(self.key_axis))
     
