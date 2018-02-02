@@ -78,8 +78,8 @@ class BatchNormalization(function_node.FunctionNode):
         for i, j in enumerate(self.key_axis):
             if gamma.shape[i] != x.shape[j]:
                 raise RuntmeError('shape mismatch')
-        print('# BN:forward: axis:{}'.format(self.axis))
-        print('# BN:forward: key_axis:{}'.format(self.key_axis))
+        # print('# BN:forward: axis:{}'.format(self.axis))
+        # print('# BN:forward: key_axis:{}'.format(self.key_axis))
 
         # expander inserts singleton dimensions to gamma and beta so that they
         # can be broadcasted with x.
