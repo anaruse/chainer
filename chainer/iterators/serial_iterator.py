@@ -44,7 +44,7 @@ class SerialIterator(iterator.Iterator):
 
         self.reset()
 
-    @cupy.prof.TimeRangeDecorator('SerialIterator:__next__', color_id=8)
+    # @cupy.prof.TimeRangeDecorator('SerialIterator:__next__', color_id=8)
     def __next__(self):
         if not self._repeat and self.epoch > 0:
             raise StopIteration

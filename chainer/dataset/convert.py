@@ -38,7 +38,7 @@ def to_device(device, x):
         return cuda.to_gpu(x, device)
 
 
-@cupy.prof.TimeRangeDecorator('concat_examples', color_id=9)
+# @cupy.prof.TimeRangeDecorator('concat_examples', color_id=9)
 def concat_examples(batch, device=None, padding=None):
     """Concatenates a list of examples into array(s).
 

@@ -11,15 +11,6 @@ from chainer.utils import type_check
 import cupy
 from cupy import prof
 
-import inspect
-import os
-
-
-def _loc():
-    frame = inspect.currentframe().f_back
-    ret = '%s, %s, %s' % (os.path.basename(frame.f_code.co_filename), frame.f_code.co_name, frame.f_lineno)
-    return ret
-
 
 def _mat_ptrs(a):
     """Creates an array of pointers to matrices
@@ -48,7 +39,7 @@ def _get_ld(a):
     return trans, int(max(a.shape[trans - 2], max(strides) // a.itemsize))
 
 
-@cupy.prof.TimeRangeDecorator('_matmul', color_id=0, sync=True)
+# @cupy.prof.TimeRangeDecorator('_matmul', color_id=0, sync=True)
 def _matmul(a, b, transa=False, transb=False, transout=False):
     if transout:
         transa, transb = not transb, not transa
@@ -60,8 +51,8 @@ def _matmul(a, b, transa=False, transb=False, transout=False):
     xp = cuda.get_array_module(a)
 
     if hasattr(xp, 'matmul'):  # numpy.matmul is supported from version 1.10.0
-        with cupy.prof.time_range('xp.matmul', color_id=0, sync=True):
-            ret = xp.matmul(a, b)
+        # with cupy.prof.time_range('xp.matmul', color_id=0, sync=True):
+        ret = xp.matmul(a, b)
     elif a.ndim <= 2:
         ret = numpy.dot(a, b)
     else:
@@ -118,7 +109,7 @@ class MatMul(function_node.FunctionNode):
                 a_type.shape[a_idx] == b_type.shape[b_idx],
             )
 
-    @cupy.prof.TimeRangeDecorator('MatMul:forward', color_id=1, sync=True)
+    # @cupy.prof.TimeRangeDecorator('MatMul:forward', color_id=1, sync=True)
     def forward(self, x):
         self.retain_inputs((0, 1))
         a, b = x
@@ -128,7 +119,7 @@ class MatMul(function_node.FunctionNode):
             y = _matmul(a, b, self.transa, self.transb, self.transc)
         return utils.force_array(y),
 
-    @cupy.prof.TimeRangeDecorator('MatMul:backward', color_id=2, sync=True)
+    # @cupy.prof.TimeRangeDecorator('MatMul:backward', color_id=2, sync=True)
     def backward(self, indexes, grad_outputs):
         a, b = self.get_retained_inputs()
         gy, = grad_outputs
