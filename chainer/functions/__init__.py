@@ -224,3 +224,6 @@ from chainer.functions.util.forget import forget  # NOQA
 
 # Aliases
 from chainer.functions.math.average import average as mean  # NOQA
+
+# NHWC
+from chainer.functions.nhwc.bnorm_add_activation import bnorm_add_activation  # NOQA
