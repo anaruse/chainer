@@ -227,3 +227,6 @@ from chainer.functions.math.average import average as mean  # NOQA
 
 # NHWC
 from chainer.functions.nhwc.bnorm_add_activation import bnorm_add_activation  # NOQA
+from chainer.functions.nhwc.bnorm_add_activation import fixed_bnorm_add_activation  # NOQA
+from chainer.functions.nhwc.nhwc_convolution_2d import nhwc_convolution_2d  # NOQA
+from chainer.functions.nhwc.nhwc_deconvolution_2d import nhwc_deconvolution_2d  # NOQA

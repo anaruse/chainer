@@ -1,5 +1,8 @@
 import numpy
 
+import cupy
+from cupy import prof
+
 import chainer
 from chainer import configuration
 from chainer import functions
@@ -69,15 +72,18 @@ class BnormAddActivation(link.Link):
         return initializers.generate_array(
             initializer, size, self.xp, dtype=self.param_dtype)
 
+    # @prof.TimeRangeDecorator()
     def forward(self, x, z=None, **kwargs):
         gamma = self.gamma
         if gamma is None:
+            print('# initialize gamma')
             with chainer.using_device(self.device):
                 gamma = self.xp.ones(
                     self.avg_mean.shape, dtype=self.param_dtype)
 
         beta = self.beta
         if beta is None:
+            print('# initialize beta')
             with chainer.using_device(self.device):
                 beta = self.xp.zeros(
                     self.avg_mean.shape, dtype=self.param_dtype)
@@ -90,17 +96,21 @@ class BnormAddActivation(link.Link):
                 activation=self.activation)
         else:
             # TODO(anaruse): improve performance
-            gamma = gamma.data.astype(self.dtype)
-            beta = beta.data.astype(self.dtype)
-            mean = self.avg_mean.astype(self.dtype)
-            var = self.avg_var.astype(self.dtype)
-            _x = x.transpose(0, 2, 3, 1)  # NCHW --> NHWC
-            h = functions.fixed_batch_normalization(
-                _x, gamma, beta, mean, var, self.eps)
-            h = h.transpose(0, 3, 1, 2)  # NHWC --> NCHW
-            if z is not None:
-                h = h + z
-            if self.activation is 'relu':
-                h = functions.relu(h)
-            ret = h
+            ret = functions.fixed_bnorm_add_activation(
+                x, gamma, beta, self.avg_mean, self.avg_var, z, self.eps, self.activation)
+            # gamma = gamma.data.astype(self.dtype)
+            # beta = beta.data.astype(self.dtype)
+            # mean = self.avg_mean.astype(self.dtype)
+            # var = self.avg_var.astype(self.dtype)
+            # # print('# mean: {}'.format(mean))
+            # # print('# var: {}'.format(var))
+            # _x = x.transpose(0, 2, 3, 1)  # NCHW --> NHWC
+            # h = functions.fixed_batch_normalization(
+            #     _x, gamma, beta, mean, var, self.eps)
+            # h = h.transpose(0, 3, 1, 2)  # NHWC --> NCHW
+            # if z is not None:
+            #     h = h + z
+            # if self.activation is 'relu':
+            #     h = functions.relu(h)
+            # ret = h
         return ret

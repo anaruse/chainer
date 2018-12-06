@@ -6,6 +6,10 @@ from chainer.backends import cuda
 from chainer import function_node
 from chainer.utils import argument
 from chainer.utils import type_check
+from chainer import functions
+
+import cupy
+from cupy import prof
 
 
 if cuda.cudnn_enabled:
@@ -66,6 +70,7 @@ class BnormAddActivation(function_node.FunctionNode):
                 gamma_type.shape == beta_type.shape,
             )
 
+    # @prof.TimeRangeDecorator()
     def forward(self, inputs):
         if len(inputs) == 3:
             self.retain_inputs((0, 1, 2))
@@ -88,6 +93,7 @@ class BnormAddActivation(function_node.FunctionNode):
         x = cuda.cupy.ascontiguousarray(x)
         gamma = cuda.cupy.ascontiguousarray(gamma)
         beta = cuda.cupy.ascontiguousarray(beta)
+
         handle = cudnn.get_handle()
         x_desc = cudnn.create_tensor_descriptor(x, self.cudnn_tensor_layout)
         if self.activation is None:
@@ -249,6 +255,77 @@ class BnormAddActivationGrad(function_node.FunctionNode):
             return gx, ggamma, gbeta, gz
 
 
+class FixedBnorm(function_node.FunctionNode):
+
+    inv_std = None
+    inv_var = None
+    dtype = numpy.float16
+    param_dtype = numpy.float32
+
+    def __init__(self, eps=2e-5):
+        # Note: cuDNN requires that eps be greater than or equals to
+        # CUDNN_BN_MIN_EPSILON. Otherwise, an error will occur.
+        # See CUDNN_BN_MIN_EPSILON value in cudnn.h to verify minimum allowable
+        # value.
+        self.eps = eps
+        if chainer.should_use_cudnn('>=auto'):
+            if eps < libcudnn.CUDNN_BN_MIN_EPSILON:
+                raise RuntimeError(
+                    'cuDNN does not allow an eps value '
+                    'less than {}.'.format(libcudnn.CUDNN_BN_MIN_EPSILON))
+
+    def check_type_forward(self, in_types):
+        type_check.expect(in_types.size() == 5)
+        x_type, gamma_type, beta_type, mean_type, var_type = in_types
+        type_check.expect(
+            x_type.dtype == self.dtype,
+            x_type.ndim == 4,
+            # TODO(beam2d): Check shape
+            gamma_type.dtype == self.param_dtype,
+            gamma_type.ndim == 1,
+            gamma_type.dtype == beta_type.dtype,
+            gamma_type.shape == beta_type.shape,
+            gamma_type.dtype == mean_type.dtype,
+            gamma_type.shape == mean_type.shape,
+            gamma_type.dtype == var_type.dtype,
+            gamma_type.shape == var_type.shape,
+        )
+
+    def forward(self, inputs):
+        x, gamma, beta, mean, var = inputs
+        xp = backend.get_array_module(x)
+        if xp is numpy:
+            raise RuntimeError('this function is available on GPU only')
+        if not chainer.should_use_cudnn('>=auto', 7400):
+            msg = 'this function is available with cuDNN 7.4 or later.'
+            raise RuntimeError(msg)
+
+        x = cuda.cupy.ascontiguousarray(x)
+
+        cudnn_tensor_layout = libcudnn.CUDNN_TENSOR_NCHW
+        cudnn_bn_mode = libcudnn.CUDNN_BATCHNORM_SPATIAL
+
+        gamma = cuda.cupy.ascontiguousarray(gamma)
+        beta = cuda.cupy.ascontiguousarray(beta)
+        dtype = x.dtype
+        handle = cudnn.get_handle()
+        x_desc = cudnn.create_tensor_descriptor(x, cudnn_tensor_layout)
+        derivedBnDesc = cudnn.create_uninitialized_tensor_descriptor()
+        libcudnn.deriveBNTensorDescriptor(derivedBnDesc.value,
+                                          x_desc.value, cudnn_bn_mode)
+        one = numpy.array(1, dtype=self.param_dtype).ctypes
+        zero = numpy.array(0, dtype=self.param_dtype).ctypes
+        y = cuda.cupy.empty_like(x)
+
+        libcudnn.batchNormalizationForwardInference(
+            handle, cudnn_bn_mode, one.data, zero.data,
+            x_desc.value, x.data.ptr, x_desc.value, y.data.ptr,
+            derivedBnDesc.value, gamma.data.ptr, beta.data.ptr,
+            mean.data.ptr, var.data.ptr, self.eps)
+
+        return y,
+
+
 def bnorm_add_activation(x, gamma, beta, z=None, **kwargs):
 
     eps, running_mean, running_var, decay, activation = argument.parse_kwargs(
@@ -263,3 +340,17 @@ def bnorm_add_activation(x, gamma, beta, z=None, **kwargs):
         args = x, gamma, beta, z
     y, = fnode.apply(args)
     return y
+
+
+def fixed_bnorm_add_activation(x, gamma, beta, mean, var, z=None, eps=2e-5, activation=None):
+
+    _x = x.transpose(0, 3, 1, 2)  # NHWC --> NCHW
+    h, = FixedBnorm(eps).apply((_x, gamma, beta, mean, var))
+    h = h.transpose(0, 2, 3, 1)  # NCHW --> NHWC
+    if z is not None:
+        h = h + z
+    if activation == 'relu':
+        h = functions.relu(h)
+    y = h
+    return y
+
