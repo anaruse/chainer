@@ -68,8 +68,6 @@ class NhwcDeconvolution2DFunction(function_node.FunctionNode):
             # x_type.shape[1] == w_type.shape[0]  # todo
         )
 
-        print('# x_type.shape: {}'.format(x_type.shape))
-        print('# w_type.shape: {}'.format(w_type.shape))
         if self.d_layout == 'NCHW':
             # _, xC, xH, xW = x_type.shape[0:4]
             xC = x_type.shape[1]
