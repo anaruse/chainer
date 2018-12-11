@@ -1,6 +1,9 @@
 import chainer
 import copy
 
+import cupy
+from cupy import prof
+
 
 class _MultiNodeOptimizer(object):
 
@@ -16,19 +19,23 @@ class _MultiNodeOptimizer(object):
         target = self.target
         if lossfun is not None:
             use_cleargrads = getattr(self, '_use_cleargrads', True)
-            loss = lossfun(*args, **kwds)
+            with prof.time_range('Forward', color_id=0):
+                loss = lossfun(*args, **kwds)
             if use_cleargrads:
                 target.cleargrads()
             else:
                 target.zerograds()
-            loss.backward(loss_scale=self.actual_optimizer._loss_scale)
+            with prof.time_range('Backward', color_id=1):
+                loss.backward(loss_scale=self.actual_optimizer._loss_scale)
             del loss
 
         if self.is_changed(target):
             self.communicator.bcast_data(target)
         else:
-            self.communicator.allreduce_grad(target)
-            self.actual_optimizer.update(None, *args, **kwds)
+            with prof.time_range('Allreduce', color_id=2):
+                self.communicator.allreduce_grad(target)
+            with prof.time_range('Update', color_id=3):
+                self.actual_optimizer.update(None, *args, **kwds)
 
     def is_changed(self, target):
         previous_params = self.target_params
