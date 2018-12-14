@@ -13,6 +13,9 @@ from chainer import serializer as serializer_module
 from chainer import variable
 import chainerx
 
+import cupy
+from cupy import prof
+
 
 class Hyperparameter(object):
 
@@ -734,30 +737,33 @@ class GradientMethod(Optimizer):
         """
         if lossfun is not None:
             use_cleargrads = getattr(self, '_use_cleargrads', True)
-            loss = lossfun(*args, **kwds)
+            with prof.time_range('Forward', color_id=0):
+                loss = lossfun(*args, **kwds)
             if use_cleargrads:
                 self.target.cleargrads()
             else:
                 self.target.zerograds()
-            loss.backward(loss_scale=self._loss_scale)
+            with prof.time_range('Backward', color_id=1):
+                loss.backward(loss_scale=self._loss_scale)
             del loss
 
-        self.reallocate_cleared_grads()
-
-        self.call_hooks('pre')
-
-        self.t += 1
-        if self.t > 1 and self._batched_update_rule is not None:
-            params = [param for _, param in sorted(self.target.namedparams())
-                      if param.grad is not None]
-            self._batched_update_rule.batched_update(params, self._loss_scale)
-        else:
-            for param in self.target.params():
-                param.update()
-
-        self.reallocate_cleared_grads()
-
-        self.call_hooks('post')
+        with prof.time_range('Update', color_id=3):
+            self.reallocate_cleared_grads()
+            
+            self.call_hooks('pre')
+            
+            self.t += 1
+            if self.t > 1 and self._batched_update_rule is not None:
+                params = [param for _, param in sorted(self.target.namedparams())
+                          if param.grad is not None]
+                self._batched_update_rule.batched_update(params, self._loss_scale)
+            else:
+                for param in self.target.params():
+                    param.update()
+            
+            self.reallocate_cleared_grads()
+            
+            self.call_hooks('post')
 
     def use_cleargrads(self, use=True):
         """Enables or disables use of :func:`~chainer.Link.cleargrads` in `update`.
