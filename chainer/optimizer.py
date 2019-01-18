@@ -181,6 +181,7 @@ class UpdateRule(object):
         except KeyError:
             del self._post_update_hooks[name]
 
+    @prof.TimeRangeDecorator('UpdateRule.update()', argb_color=0xffff8c00, sync=True)
     def update(self, param):
         """Invokes hook functions and updates the parameter.
 
@@ -200,6 +201,8 @@ class UpdateRule(object):
                     name=param.name)
             fp32_param = self._fp32_param
             fp32_param.grad = param.grad.astype(numpy.float32)
+            if getattr(param, 'kfgrad', None) is not None:
+                fp32_param.kfgrad = param.kfgrad.astype(numpy.float32)
 
             if fp32_param.data is not None:
                 self._prepare(fp32_param)
@@ -213,6 +216,8 @@ class UpdateRule(object):
 
             param.data = fp32_param.data.astype(param.dtype)
             fp32_param.grad = None
+            if getattr(param, 'kfgrad', None) is not None:
+                fp32_param.kfgrad = None
         else:
             if param.data is not None:
                 self._prepare(param)
