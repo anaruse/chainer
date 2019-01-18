@@ -208,6 +208,8 @@ class UpdateRule(object):
                 self._prepare(fp32_param)
             if param._loss_scale is not None:
                 fp32_param.grad /= param._loss_scale
+                if getattr(param, 'kfgrad', None) is not None:
+                    fp32_param.kfgrad /= param._loss_scale
             for hook in six.itervalues(self._pre_update_hooks):
                 hook(self, fp32_param)
             self.update_core(fp32_param)
