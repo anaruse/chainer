@@ -199,6 +199,9 @@ class UpdateRule(object):
                 self._fp32_param = variable.Variable(
                     param.array.astype(numpy.float32),
                     name=param.name)
+                if hasattr(param, '_link'):
+                    self._fp32_param._link = param._link  # for debug
+                    self._fp32_param._linkname = param._linkname  # for debug
             fp32_param = self._fp32_param
             fp32_param.grad = param.grad.astype(numpy.float32)
             if getattr(param, 'kfgrad', None) is not None:
