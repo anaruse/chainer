@@ -228,6 +228,8 @@ class UpdateRule(object):
                 self._prepare(param)
             if param._loss_scale is not None:
                 param.grad /= param._loss_scale
+                if getattr(param, 'kfgrad', None) is not None:
+                    param.kfgrad /= param._loss_scale
             for hook in six.itervalues(self._pre_update_hooks):
                 hook(self, param)
             self.update_core(param)
