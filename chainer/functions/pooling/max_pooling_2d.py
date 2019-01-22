@@ -70,6 +70,10 @@ class MaxPooling2D(pooling_2d.Pooling2D):
         if chainer.should_use_cudnn('>=auto'):
             return super(MaxPooling2D, self).forward_gpu(x)
 
+        if self.layout != 'NCHW':
+            raise ValueError('a layout:{} is not supported'
+                             ''.format(self.layout))
+
         self._in_shape = x[0].shape
         self._in_dtype = x[0].dtype
 
@@ -347,7 +351,7 @@ class MaxPooling2DWithIndexes(function_node.FunctionNode):
 
 
 def max_pooling_2d(x, ksize, stride=None, pad=0, cover_all=True,
-                   return_indices=False):
+                   return_indices=False, layout='NCHW'):
     """Spatial max pooling function.
 
     This function acts similarly to :func:`~chainer.functions.convolution_2d`,
@@ -381,7 +385,8 @@ def max_pooling_2d(x, ksize, stride=None, pad=0, cover_all=True,
             device as the input.
 
     """
-    func = MaxPooling2D(ksize, stride, pad, cover_all, return_indices)
+    func = MaxPooling2D(ksize, stride, pad, cover_all, return_indices,
+                        layout=layout)
     if return_indices:
         with chainer.using_config('use_cudnn', 'never'):
             out = func.apply((x,))[0]

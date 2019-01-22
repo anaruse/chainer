@@ -6,6 +6,7 @@ from chainer.utils import type_check
 
 if cuda.cudnn_enabled:
     cudnn = cuda.cudnn
+    libcudnn = cuda.cuda.cudnn
 
 
 def _pair(x):
@@ -19,7 +20,7 @@ class Pooling2D(function_node.FunctionNode):
     """Base class of pooling function over a set of 2d planes."""
 
     def __init__(self, ksize, stride=None, pad=0, cover_all=True,
-                 return_indices=False):
+                 return_indices=False, layout='NCHW'):
         if stride is None:
             stride = ksize
 
@@ -29,6 +30,9 @@ class Pooling2D(function_node.FunctionNode):
 
         self.cover_all = cover_all
         self.return_indices = return_indices
+        self.layout = layout
+        if layout not in ('NCHW', 'NHWC'):
+            raise ValueError('unsupported layout: {}'.format(layout))
 
         self._used_cudnn = False
         self._cudnn_inputs = None
@@ -47,19 +51,30 @@ class Pooling2D(function_node.FunctionNode):
 
         # Implementation using cudnn
         x = x[0]
-        n, c, h, w = x.shape
+
+        if self.layout == 'NCHW':
+            n, c, h, w = x.shape
+        else:
+            n, h, w, c = x.shape
+
         y_h = conv.get_conv_outsize(
             h, self.kh, self.sy, self.ph, self.cover_all)
         assert y_h > 0, 'Height in the output should be positive.'
         y_w = conv.get_conv_outsize(
             w, self.kw, self.sx, self.pw, self.cover_all)
         assert y_w > 0, 'Width in the output should be positive.'
-        y = cuda.cupy.empty((n, c, y_h, y_w), dtype=x.dtype)
+
+        if self.layout == 'NCHW':
+            y = cuda.cupy.empty((n, c, y_h, y_w), dtype=x.dtype)
+            self.cudnn_layout = libcudnn.CUDNN_TENSOR_NCHW
+        else:
+            y = cuda.cupy.empty((n, y_h, y_w, c), dtype=x.dtype)
+            self.cudnn_layout = libcudnn.CUDNN_TENSOR_NHWC
 
         cudnn.pooling_forward(
             x, y,
             (self.kh, self.kw), (self.sy, self.sx), (self.ph, self.pw),
-            self._get_pool_mode())
+            self._get_pool_mode(), self.cudnn_layout)
         self._cudnn_inputs = (x,)
         self._cudnn_outputs = (y,)
         self.retain_outputs((0,))
@@ -72,7 +87,7 @@ class Pooling2D(function_node.FunctionNode):
         gx = cudnn.pooling_backward(
             x, y, gy[0],
             (self.kh, self.kw), (self.sy, self.sx), (self.ph, self.pw),
-            self._get_pool_mode())
+            self._get_pool_mode(), self.cudnn_layout)
         return gx,
 
     def _get_pool_mode(self):

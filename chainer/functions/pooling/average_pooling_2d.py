@@ -59,6 +59,10 @@ class AveragePooling2D(pooling_2d.Pooling2D):
             self.retain_inputs((0,))
             return super(AveragePooling2D, self).forward_gpu(x)
 
+        if self.layout != 'NCHW':
+            raise ValueError('a layout:{} is not supported'
+                             ''.format(self.layout))
+
         self._in_shape = x[0].shape
         self._in_dtype = x[0].dtype
 
@@ -189,7 +193,7 @@ class AveragePooling2DGrad(function_node.FunctionNode):
             False).apply(grad_outputs)
 
 
-def average_pooling_2d(x, ksize, stride=None, pad=0):
+def average_pooling_2d(x, ksize, stride=None, pad=0, layout='NCHW'):
     """Spatial average pooling function.
 
     This function acts similarly to :func:`~chainer.functions.convolution_2d`,
@@ -224,4 +228,5 @@ def average_pooling_2d(x, ksize, stride=None, pad=0):
     """
     if backend.get_array_module(x) is chainerx:
         return average_pooling_nd.average_pooling_nd(x, ksize, stride, pad)
-    return AveragePooling2D(ksize, stride, pad, False).apply((x,))[0]
+    return AveragePooling2D(ksize, stride, pad, False,
+                            layout=layout).apply((x,))[0]
