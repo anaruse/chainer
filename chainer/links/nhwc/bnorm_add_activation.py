@@ -64,6 +64,10 @@ class BnormAddActivation(link.Link):
             self.gamma.initialize(shape)
         if self.beta is not None:
             self.beta.initialize(shape)
+        self._ones = None
+        self._zeros = None
+        self._dummy_mean = None
+        self._dummy_var = None
 
     def _init_array(self, initializer, default_value, size):
         if initializer is None:
@@ -87,6 +91,13 @@ class BnormAddActivation(link.Link):
             with chainer.using_device(self.device):
                 beta = self.xp.zeros(
                     self.avg_mean.shape, dtype=self.param_dtype)
+
+        if self._ones is None:
+            with chainer.using_device(self.device):
+                self._ones = self.xp.ones(self.avg_mean.shape, dtype=self.param_dtype)
+                self._zeros = self.xp.zeros(self.avg_mean.shape, dtype=self.param_dtype)
+                self._dummy_mean = self.xp.ones(self.avg_mean.shape, dtype=self.param_dtype)
+                self._dummy_var = self.xp.ones(self.avg_mean.shape, dtype=self.param_dtype)
 
         if configuration.config.train:
             ret = functions.bnorm_add_activation(

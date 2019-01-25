@@ -18,16 +18,20 @@ if cuda.cudnn_enabled:
     _cudnn_version = cuda.cuda.cudnn.getVersion()
     memory = cuda.cuda.memory
 
+_g_alpha = numpy.array(1, dtype=numpy.float32).ctypes
+_g_beta = numpy.array(0, dtype=numpy.float32).ctypes
+
 
 class BnormAddActivation(function_node.FunctionNode):
     " y = activation( bnorm(x) + z ) "
-    mean = None
-    inv_std = None
+    save_mean = None
+    save_inv_std = None
     cudnn_bn_mode = libcudnn.CUDNN_BATCHNORM_SPATIAL_PERSISTENT
     cudnn_tensor_layout = libcudnn.CUDNN_TENSOR_NHWC
     dtype = numpy.float16
     param_dtype = numpy.float32
 
+    # @prof.TimeRangeDecorator('BAA.__init__', color_id=0, sync=True)
     def __init__(self, eps=2e-5, mean=None, var=None, decay=0.9,
                  activation=None):
         self.running_mean = mean
@@ -70,7 +74,7 @@ class BnormAddActivation(function_node.FunctionNode):
                 gamma_type.shape == beta_type.shape,
             )
 
-    # @prof.TimeRangeDecorator()
+    # @prof.TimeRangeDecorator('BAA.forward', color_id=1, sync=1)
     def forward(self, inputs):
         if len(inputs) == 3:
             self.retain_inputs((0, 1, 2))
@@ -129,15 +133,17 @@ class BnormAddActivation(function_node.FunctionNode):
         running_mean = self.running_mean
         running_var = self.running_var
 
-        one = numpy.array(1, dtype=self.param_dtype).ctypes
-        zero = numpy.array(0, dtype=self.param_dtype).ctypes
+        # _alpha = numpy.array(1, dtype=self.param_dtype).ctypes
+        # _beta = numpy.array(0, dtype=self.param_dtype).ctypes
+        _alpha = _g_alpha
+        _beta = _g_beta
         y = cuda.cupy.empty_like(x)
         # Factor used in the moving average
         factor = 1 - self.decay
 
-        if self.mean is None:
-            self.mean = xp.empty_like(gamma)
-            self.inv_std = xp.empty_like(gamma)
+        if self.save_mean is None:
+            self.save_mean = xp.empty_like(gamma)
+            self.save_inv_std = xp.empty_like(gamma)
 
         workspace_size = libcudnn.getBatchNormalizationForwardTrainingExWorkspaceSize(  # NOQA
             handle, self.cudnn_bn_mode, cudnn_bn_ops, x_desc.value,
@@ -152,7 +158,7 @@ class BnormAddActivation(function_node.FunctionNode):
 
         libcudnn.batchNormalizationForwardTrainingEx(
             handle, self.cudnn_bn_mode, cudnn_bn_ops,
-            one.data, zero.data,
+            _alpha.data, _beta.data,
             x_desc.value, x.data.ptr,
             x_desc.value, z.data.ptr,
             x_desc.value, y.data.ptr,
@@ -160,7 +166,8 @@ class BnormAddActivation(function_node.FunctionNode):
             gamma.data.ptr, beta.data.ptr,
             factor,
             running_mean.data.ptr, running_var.data.ptr,
-            self.eps, self.mean.data.ptr, self.inv_std.data.ptr,
+            self.eps,
+            self.save_mean.data.ptr, self.save_inv_std.data.ptr,
             act_desc.value,
             workspace.ptr, workspace_size,
             self.reservespace.ptr, self.reservespace_size)
