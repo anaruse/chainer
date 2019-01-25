@@ -184,7 +184,7 @@ class BnormAddActivation(function_node.FunctionNode):
         y = self.get_retained_outputs()[0]
         gy, = grad_outputs
 
-        f = BnormAddActivationGrad(self.eps, self.mean, self.inv_std,
+        f = BnormAddActivationGrad(self.eps, self.save_mean, self.save_inv_std,
                                    self.cudnn_bn_ops, self.act_desc,
                                    self.reservespace, self.reservespace_size)
         return f.apply((x, gamma, beta, z, y, gy))
