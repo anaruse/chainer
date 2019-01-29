@@ -29,12 +29,14 @@ class ProgressBar(extension.Extension):
     """
 
     def __init__(self, training_length=None, update_interval=100,
-                 bar_length=50, out=sys.stdout):
+                 bar_length=50, out=sys.stdout, per_epoch_iterations=None):
         self._training_length = training_length
         self._status_template = None
         self._update_interval = update_interval
         self._bar_length = bar_length
         self._out = out
+        self._per_epoch_iterations = per_epoch_iterations
+
         self._recent_timing = []
 
     def __call__(self, trainer):
@@ -80,7 +82,11 @@ class ProgressBar(extension.Extension):
             out.write('     total [{}{}] {:6.2%}\n'.format(
                 marks, '.' * (bar_length - len(marks)), rate))
 
-            epoch_rate = epoch - int(epoch)
+            if self._per_epoch_iterations is None:
+                epoch_rate = epoch - int(epoch)
+            else:
+                _epoch = trainer.updater.iteration / self._per_epoch_iterations
+                epoch_rate = _epoch - int(_epoch)
             marks = '#' * int(epoch_rate * bar_length)
             out.write('this epoch [{}{}] {:6.2%}\n'.format(
                 marks, '.' * (bar_length - len(marks)), epoch_rate))
