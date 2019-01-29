@@ -21,6 +21,16 @@ def init_ranks(mpi_comm):
                 * inter_size (number of computing nodes)
     """
 
+    # for ABCI
+    if True:
+        PPN = 4
+        return \
+            mpi_comm.rank,\
+            mpi_comm.rank % PPN,\
+            PPN,\
+            mpi_comm.rank // PPN,\
+            mpi_comm.size // PPN
+    
     global_names = mpi_comm.gather(mpi4py.MPI.Get_processor_name())
 
     if mpi_comm.rank == 0:
