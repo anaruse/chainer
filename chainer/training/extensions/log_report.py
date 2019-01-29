@@ -56,12 +56,13 @@ class LogReport(extension.Extension):
     """
 
     def __init__(self, keys=None, trigger=(1, 'epoch'), postprocess=None,
-                 log_name='log'):
+                 log_name='log', per_epoch_iterations=None):
         self._keys = keys
         self._trigger = trigger_module.get_trigger(trigger)
         self._postprocess = postprocess
         self._log_name = log_name
         self._log = []
+        self._per_epoch_iterations = per_epoch_iterations
 
         self._init_summary()
 
@@ -84,7 +85,10 @@ class LogReport(extension.Extension):
                 stats_cpu[name] = float(value)  # copy to CPU
 
             updater = trainer.updater
-            stats_cpu['epoch'] = updater.epoch
+            if self._per_epoch_iterations is None:
+                stats_cpu['epoch'] = updater.epoch
+            else:
+                stats_cpu['epoch'] = updater.iteration / self._per_epoch_iterations
             stats_cpu['iteration'] = updater.iteration
             stats_cpu['elapsed_time'] = trainer.elapsed_time
 
