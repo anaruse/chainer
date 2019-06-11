@@ -45,6 +45,7 @@ from chainer.links.connection.scale import Scale  # NOQA
 from chainer.links.connection.tree_lstm import ChildSumTreeLSTM  # NOQA
 from chainer.links.connection.tree_lstm import NaryTreeLSTM  # NOQA
 from chainer.links.connection.zoneoutlstm import StatefulZoneoutLSTM  # NOQA
+from chainer.links.fused_ops.fused_ops import FusedScaleBiasActConvBnstats  # NOQA
 from chainer.links.loss.black_out import BlackOut  # NOQA
 from chainer.links.loss.crf1d import CRF1d  # NOQA
 from chainer.links.loss.hierarchical_softmax import BinaryHierarchicalSoftmax  # NOQA
