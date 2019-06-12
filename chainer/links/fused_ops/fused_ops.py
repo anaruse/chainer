@@ -1,5 +1,6 @@
 import numpy
 
+from chainer import configuration
 from chainer.functions.fused_ops import fused_ops
 from chainer import initializers
 from chainer import link
@@ -12,7 +13,7 @@ def _pair(x):
     return x, x
 
 
-class FusedScaleBiasActConvBnstats(link.Link):
+class FusedScaleBiasActConvBn(link.Link):
 
     """__init__(self, in_channels, out_channels, ksize, stride=1, pad=0, \
 bn_decay=0.9, bn_eps=2e-5):
@@ -31,7 +32,7 @@ bn_decay=0.9, bn_eps=2e-5):
     
     def __init__(self, in_channels, out_channels, ksize, stride=1, pad=0,
                  bn_decay=0.9, bn_eps=2e-5):
-        super(FusedScaleBiasActConvBnstats, self).__init__()
+        super(FusedScaleBiasActConvBn, self).__init__()
 
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -76,12 +77,17 @@ bn_decay=0.9, bn_eps=2e-5):
             initializer, size, self.xp, dtype=dtype, device=self.device)
 
     def forward(self, x, scale=None, bias=None, **kwargs):
-
-        y, scale, bias = fused_ops.fused_scale_bias_act_conv_bnstats(
-            x, self.W, self.gamma, self.beta,
-            scale=scale, bias=bias,
-            stride=self.stride, pad=self.pad,
-            bn_eps=self.bn_eps, bn_decay=self.bn_decay,
-            running_mean=self.running_mean, running_var=self.running_var)
+        if configuration.config.train:
+            ret = fused_ops.fused_scale_bias_act_conv_bn(
+                x, self.W, self.gamma, self.beta, scale=scale, bias=bias,
+                stride=self.stride, pad=self.pad,
+                bn_eps=self.bn_eps, bn_decay=self.bn_decay,
+                running_mean=self.running_mean, running_var=self.running_var)
+        else:
+            ret = fused_ops.fused_scale_bias_act_conv_bn_inference(
+                x, self.W, self.gamma, self.beta, scale=scale, bias=bias,
+                stride=self.stride, pad=self.pad,
+                bn_eps=self.bn_eps,
+                running_mean=self.running_mean, running_var=self.running_var)
         
-        return y, scale, bias
+        return ret

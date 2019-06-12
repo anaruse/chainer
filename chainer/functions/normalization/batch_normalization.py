@@ -185,6 +185,7 @@ class BatchNormalization(function_node.FunctionNode):
                 gamma.shape[0] % 4 == 0 and
                 _cudnn_version >= 7400):
             self.use_cudnn_ex = True
+        self.use_cudnn_ex = False
 
         if self.use_ideep:
             # TODO(niboshi): Refactor iDeep part into a separate method
