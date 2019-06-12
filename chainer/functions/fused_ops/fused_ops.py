@@ -1,5 +1,7 @@
 import numpy
 
+import cupy
+
 import chainer
 from chainer import backend
 from chainer.backends import cuda
@@ -9,6 +11,8 @@ from chainer import utils
 from chainer.utils import argument
 from chainer.utils import conv
 from chainer.utils import type_check
+
+from cupy import prof
 
 
 if cuda.cudnn_enabled:
@@ -22,6 +26,17 @@ def _pair(x):
     if hasattr(x, '__getitem__'):
         return x
     return x, x
+
+
+_num_SM = [None] * 16
+
+
+def _get_num_SM():
+    dev_id = cupy.cuda.runtime.getDevice()
+    if _num_SM[dev_id] is None:
+        _num_SM[dev_id] = cupy.cuda.runtime.deviceGetAttribute(
+            cupy.cuda.runtime.cudaDevAttrMultiProcessorCount, dev_id)
+    return _num_SM[dev_id]
 
 
 class FusedScaleBiasActConvBnFunction(function_node.FunctionNode):
@@ -221,6 +236,7 @@ class FusedScaleBiasActConvBnFunction(function_node.FunctionNode):
         self.retain_outputs((0, 1))
         return y, out_scale, out_bias
 
+    # @prof.TimeRangeDecorator(sync=True)
     def backward(self, indexes, grad_outputs):
         x, W, gamma, beta = self.get_retained_inputs()
         y, out_scale = self.get_retained_outputs()
@@ -254,6 +270,10 @@ class FusedScaleBiasActConvBnFunction(function_node.FunctionNode):
             use_tensor_core=True)
         bn_mode = libcudnn.CUDNN_BATCHNORM_SPATIAL_PERSISTENT
         ptr_ph = libcudnn.CUDNN_PTR_16B_ALIGNED
+
+        # **** ggamma, gbeta ****
+        ggamma, gbeta, gy = cupy_compute_grad_gamma_beta_y(
+            gamma, beta, y, gy, out_scale, self.saved_mean, self.saved_invstd)
 
         # **** gW ****
         ops = libcudnn.CUDNN_FUSED_SCALE_BIAS_ACTIVATION_WGRAD
@@ -310,42 +330,195 @@ class FusedScaleBiasActConvBnFunction(function_node.FunctionNode):
         del workspace
 
         # **** gx ****
-        gh = chainer.functions.deconvolution_2d(
+        gx = chainer.functions.deconvolution_2d(
             gy, W, stride=(self.sy, self.sx), pad=(self.ph, self.pw),
             outsize=(in_h, in_w), dilate=(self.dy, self.dx),
-            tensor_layout=self.tensor_layout)
-        if self.scale is None:
-            gx = gh
-        else:
-            h = self.scale * x + self.bias
-            gx = self.scale * gh
-            gx.data[h <= 0] = 0
+            tensor_layout=self.tensor_layout).data
+        if self.scale is not None:
+            gx = cupy_adjust_grad_x(x, self.scale, self.bias, gx)
 
-        # **** ggamma, gbeta ****
-        out_scale = out_scale.astype(numpy.float32)
-
-        ggamma = gy * y
-        ggamma = ggamma.astype(numpy.float32)
-        ggamma = cuda.cupy.sum(ggamma, axis=(0, 1, 2))
-        ggamma = ggamma / out_scale * self.saved_invstd
-        ggamma = ggamma.reshape((out_c,))
-
-        gbeta = gy
-        gbeta = cuda.cupy.sum(gbeta, axis=(0, 1, 2))
-        gbeta = gbeta / out_scale
-        gbeta = gbeta.reshape((out_c,))
-
-        #print('# ggamma: {}'.format(ggamma))
-        #print('# ggamma.shape/dtype: {}'.format((ggamma.shape, ggamma.dtype)))
-        #print('# gbeta: {}'.format(gbeta))
-        #print('# gbeta.shape/dtype: {}'.format((gbeta.shape, gbeta.dtype)))
-
+        gx = chainer.Variable(gx)
         gW = chainer.Variable(gW)
         ggamma = chainer.Variable(ggamma)
         gbeta = chainer.Variable(gbeta)
 
-        ret = [gx, gW, ggamma, gbeta]
-        return ret
+        return gx, gW, ggamma, gbeta
+
+
+def cupy_adjust_grad_x(x, scale, bias, gx):
+    _n, _h, _w, _c = x.shape
+
+    if False:
+        # reference implementation
+        gx = scale * gx
+        _x = scale * x + bias
+        gx[_x < 0] = 0
+        return gx
+
+    block_size = 512
+    n_blocks = (_n * _h * _w * _c + block_size - 1) // block_size
+    _cupy_adjust_grad_x()(
+        (n_blocks,), (block_size,),
+        (x, scale, bias, gx, _n, _h, _w, _c))
+    return gx
+
+
+def _cupy_adjust_grad_x():
+    return cupy.RawKernel(r'''
+#include <cuda_fp16.h>
+    extern "C" __global__
+    void cupy_adjust_grad_x(
+        const half *x, const half *scale, const half *bias,
+        half *gx,
+        int _n, int _h, int _w, int _c)
+    {
+        int i = threadIdx.x + blockDim.x * blockIdx.x;
+        int num_elements = _n * _h * _w * _c;
+        if (i >= num_elements) return;
+        int c = i % _c;
+
+        float _x_ = (float)x[i] * (float)scale[c] + (float)bias[c];
+        if (_x_ > 0.0) {
+            gx[i] = (half)((float)gx[i] * (float)scale[c]);
+        }
+        else {
+            gx[i] = (half)0;
+        }
+    }
+    ''', 'cupy_adjust_grad_x')
+
+
+def cupy_compute_grad_gamma_beta_y(gamma, beta, y, gy, scale, mean, invstd):
+    _n, _h, _w, _c = y.shape
+
+    if False:
+        # reference implementation
+        _scale = scale.astype(numpy.float32)
+
+        ggamma = gy * y
+        ggamma = ggamma.astype(numpy.float32)
+        ggamma = cuda.cupy.sum(ggamma, axis=(0, 1, 2))
+        ggamma = ggamma / _scale * invstd
+        ggamma = ggamma * invstd
+        ggamma = ggamma.reshape((_c,))
+
+        gbeta = gy
+        gbeta = cuda.cupy.sum(gbeta, axis=(0, 1, 2))
+        gbeta = gbeta / _scale
+        gbeta = gbeta.reshape((_c,))
+
+        _y = (y - mean) * invstd
+        _gy = gy / _scale * invstd * gamma
+        _gy = _gy - (gbeta + ggamma * _y) / (_n * _h * _w)
+        _gy = _gy.astype(numpy.float16)
+
+        return ggamma, gbeta, _gy
+
+    ggamma = cupy.zeros((_c,), dtype=numpy.float32)
+    gbeta = cupy.zeros_like(ggamma)
+    block_size = 1024
+    n_blocks = _get_num_SM()
+    _cupy_compute_grad_gamma_beta()(
+        (n_blocks,), (block_size,),
+        (y, gy, scale, invstd,
+         ggamma, gbeta,
+         _n, _h, _w, _c))
+
+    _gy = cupy.empty_like(gy)
+    block_size = 256
+    n_blocks = (_n * _h * _w * _c + block_size - 1) // block_size
+    _cupy_adjust_grad_y()(
+        (n_blocks,), (block_size,),
+        (gamma, ggamma, beta, gbeta, y, gy, mean, invstd, scale, _gy,
+         _n, _h, _w, _c))
+
+    return ggamma, gbeta, _gy
+
+
+def _cupy_adjust_grad_y():
+    return cupy.RawKernel(r'''
+#include <cuda_fp16.h>
+    extern "C" __global__
+    void cupy_adjust_grad_y(
+        const float *gamma, const float *ggamma,
+        const float *beta, const float *gbeta,
+        const half *y, const half *gy,
+        const float *mean, const float *invstd,
+        const half *scale,
+        half *out_gy,
+        int _n, int _h, int _w, int _c)
+    {
+        int tid = threadIdx.x + blockDim.x * blockIdx.x;
+        int num_threads = blockDim.x * gridDim.x;
+        int num_elements = _n * _h * _w * _c;
+
+        for (int i = tid; i < num_elements; i += num_threads) {
+            int c = i % _c;
+            float _y = ((float)y[i] - mean[c]) * invstd[c];
+            float _gy = (float)gy[i] / (float)scale[c] * invstd[c] * gamma[c]
+                - (gbeta[c] + ggamma[c] * _y) / (_n * _h * _w);
+            out_gy[i] = (half)_gy;
+        }
+    }
+    ''', 'cupy_adjust_grad_y')
+
+
+def _cupy_compute_grad_gamma_beta():
+    return cupy.RawKernel(r'''
+#include <cuda_fp16.h>
+    extern "C" __global__
+    void cupy_compute_grad_gamma_beta(
+        const half *y, const half *gy, const half *scale, const float *invstd,
+        float *ggamma, float *gbeta,
+        int _n, int _h, int _w, int _c)
+    {
+        __shared__ float sm_ggamma[2048];
+        __shared__ float sm_gbeta[2048];
+
+        for (int i = threadIdx.x; i < _c; i += blockDim.x) {
+            sm_ggamma[i] = 0.0;
+            sm_gbeta[i] = 0.0;
+        }
+        __syncthreads();
+
+        int tid = threadIdx.x + blockDim.x * blockIdx.x;
+        int num_threads = blockDim.x * gridDim.x;
+        int num_elements = _n * _h * _w * _c;
+        int pre_c = -1;
+        float my_ggamma = 0.0;
+        float my_gbeta = 0.0;
+        for (int i = tid; i < num_elements; i += num_threads) {
+            int cur_c = i % _c;
+            if (pre_c >= 0 && pre_c != cur_c) {
+                my_ggamma /= (float)scale[pre_c];
+                my_ggamma *= invstd[pre_c];
+                my_gbeta /= (float)scale[pre_c];
+                atomicAdd(&sm_ggamma[pre_c], my_ggamma);
+                atomicAdd(&sm_gbeta[pre_c], my_gbeta);
+                my_ggamma = 0.0;
+                my_gbeta = 0.0;
+            }
+            my_ggamma += (float)y[i] * (float)gy[i];
+            my_gbeta += (float)gy[i];
+            pre_c = cur_c;
+        }
+        if (pre_c >= 0) {
+            my_ggamma /= (float)scale[pre_c];
+            my_ggamma *= invstd[pre_c];
+            my_gbeta /= (float)scale[pre_c];
+            atomicAdd(&sm_ggamma[pre_c], my_ggamma);
+            atomicAdd(&sm_gbeta[pre_c], my_gbeta);
+            my_ggamma = 0.0;
+            my_gbeta = 0.0;
+        }
+
+        __syncthreads();
+        for (int i = threadIdx.x; i < _c; i += blockDim.x) {
+            atomicAdd(&ggamma[i], sm_ggamma[i]);
+            atomicAdd(&gbeta[i], sm_gbeta[i]);
+        }
+    }
+    ''', 'cupy_compute_grad_gamma_beta')
 
 
 class FusedScaleBiasActConvBnInferenceFunction(function_node.FunctionNode):
