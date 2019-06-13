@@ -231,3 +231,5 @@ from chainer.functions.util.forget import forget  # NOQA
 
 # Aliases
 from chainer.functions.math.average import average as mean  # NOQA
+
+from chainer.functions.fused_ops.fused_ops import fused_scale_bias_add_relu
