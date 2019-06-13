@@ -370,13 +370,14 @@ class FusedScaleBiasActConvBnFunction(function_node.FunctionNode):
             return _gy, g_gamma, g_beta
 
         _gy = cupy.empty_like(gy)
+
         block_size = 256
-        n_blocks = (_n * _h * _w * _c + block_size - 1) // block_size
+        n_blocks = _get_num_SM() * 4
         self._cupy_adjust_grad_y()(
             (n_blocks,), (block_size,),
             (y, gy, gamma, g_gamma, g_beta, self.saved_mean, self.saved_invstd,
              _gy,
-             _n, _h, _w, _c))
+             _n, _h, _w, _c // 2))
         return _gy, g_gamma, g_beta
 
     def _compute_grad_x_scale_bias(self, x, gx, scale, bias):
@@ -399,6 +400,7 @@ class FusedScaleBiasActConvBnFunction(function_node.FunctionNode):
 
         block_size = 1024
         n_blocks = _get_num_SM()
+        assert _c <= 2048
         self._cupy_compute_grad_x_scale_bias()(
             (n_blocks,), (block_size,),
             (x, gx, scale, bias,
@@ -411,21 +413,45 @@ class FusedScaleBiasActConvBnFunction(function_node.FunctionNode):
 #include <cuda_fp16.h>
     extern "C" __global__
     void cupy_adjust_grad_y(
-        const half *y, const half *gy,
-        const float *gamma, const float *g_gamma, const float *g_beta,
-        const float *mean, const float *invstd,
-        half *o_gy,
+        const half2 *y, const half2 *gy,
+        const float2 *gamma, const float2 *g_gamma, const float2 *g_beta,
+        const float2 *mean, const float2 *invstd,
+        half2 *o_gy,
         int _n, int _h, int _w, int _c)
-        {
-            int i = threadIdx.x + blockDim.x * blockIdx.x;
-            int num_elements = _n * _h * _w * _c;
-            if (i >= num_elements) return;
+    {
+        int tid = threadIdx.x + blockDim.x * blockIdx.x;
+        int num_threads = blockDim.x * gridDim.x;
+        int num_elements = _n * _h * _w * _c;
+        float2 mean_c;
+        float2 invstd_c;
+        float2 g_beta_c;
+        float2 g_gamma_c;
+        int pre_c = -1;
+        for (int i = tid; i < num_elements; i += num_threads) {
             int c = i % _c;
-            float _y = ((float)y[i] - mean[c]) * invstd[c];
-            float _gy = (float)gy[i]
-                      - (g_beta[c] + g_gamma[c] * _y) / (_n * _h * _w);
-            o_gy[i] = (half)_gy;
+            if (pre_c != c) {
+                mean_c = mean[c];
+                invstd_c = invstd[c];
+                g_beta_c = g_beta[c];
+                g_gamma_c = g_gamma[c];
+            }
+            pre_c = c;
+            half2 y_i = y[i];
+            half2 gy_i = gy[i];
+            float2 _y;
+            _y.x = ((float)y_i.x - mean_c.x) * invstd_c.x;
+            _y.y = ((float)y_i.y - mean_c.y) * invstd_c.y;
+            float2 _gy;
+            _gy.x = (float)gy_i.x
+                  - (g_beta_c.x + g_gamma_c.x * _y.x) / (_n * _h * _w);
+            _gy.y = (float)gy_i.y
+                  - (g_beta_c.y + g_gamma_c.y * _y.y) / (_n * _h * _w);
+            half2 o_gy_i;
+            o_gy_i.x = (half)_gy.x;
+            o_gy_i.y = (half)_gy.y;
+            o_gy[i] = o_gy_i;
         }
+    }
         ''', 'cupy_adjust_grad_y')
 
     def _cupy_compute_grad_x_scale_bias(self):
@@ -733,8 +759,9 @@ class FusedScaleBiasAddReluFunction(function_node.FunctionNode):
         bias = cuda.cupy.ascontiguousarray(bias)
         scale = cuda.cupy.ascontiguousarray(scale)
         z = cupy.empty_like(x)
+
         block_size = 256
-        n_blocks = (_n * _h * _w * _c // 2 + block_size - 1) // block_size
+        n_blocks = _get_num_SM() * 4
         self._cupy_forward()(
             (n_blocks,), (block_size,),
             (x, scale, bias, y,
@@ -751,23 +778,31 @@ class FusedScaleBiasAddReluFunction(function_node.FunctionNode):
         half2 *z,
         int _n, int _h, int _w, int _c)
     {
-        int i = threadIdx.x + blockDim.x * blockIdx.x;
+        int tid = threadIdx.x + blockDim.x * blockIdx.x;
+        int num_threads = blockDim.x * gridDim.x;
         int num_elements = _n * _h * _w * _c;
-        if (i >= num_elements) return;
-        int c = i % _c;
-        half2 _x = x[i];
-        half2 _y = y[i];
-        half2 _bias = bias[c];
-        half2 _scale = scale[c];
-        float2 _z;
-        _z.x = (float)_x.x * (float)_scale.x + (float)_bias.x + (float)_y.x;
-        _z.y = (float)_x.y * (float)_scale.y + (float)_bias.y + (float)_y.y;
-        if (_z.x < 0) _z.x = 0.0;
-        if (_z.y < 0) _z.y = 0.0;
-        half2 h2_z;
-        h2_z.x = (half)_z.x;
-        h2_z.y = (half)_z.y;
-        z[i] = h2_z;
+        half2 bias_c;
+        half2 scale_c;
+        int pre_c = -1;
+        for (int i = tid; i < num_elements; i += num_threads) {
+            int c = i % _c;
+            if (pre_c != c) {
+                bias_c = bias[c];
+                scale_c = scale[c];
+            }
+            pre_c = c;
+            half2 x_i = x[i];
+            half2 y_i = y[i];
+            float2 _z;
+            _z.x = (float)x_i.x * (float)scale_c.x + (float)bias_c.x + (float)y_i.x;
+            _z.y = (float)x_i.y * (float)scale_c.y + (float)bias_c.y + (float)y_i.y;
+            if (_z.x < 0) _z.x = 0.0;
+            if (_z.y < 0) _z.y = 0.0;
+            half2 z_i;
+            z_i.x = (half)_z.x;
+            z_i.y = (half)_z.y;
+            z[i] = z_i;
+        }
     }
     ''', 'cupy_FSBAR_forward')
 
@@ -803,6 +838,7 @@ class FusedScaleBiasAddReluFunction(function_node.FunctionNode):
         gy = cupy.empty_like(gx)
         g_scale = cupy.zeros((_c,), dtype=scale.dtype)
         g_bias = cupy.zeros_like(g_scale)
+
         block_size = 1024
         n_blocks = _get_num_SM()
         assert _c <= 2048
@@ -843,7 +879,7 @@ class FusedScaleBiasAddReluFunction(function_node.FunctionNode):
         int pre_c = -1;
         float2  my_g_bias;
         float2  my_g_scale;
-        half2  _h2_tmp;
+        float2 scale_c;
         for (int i = tid; i < num_elements; i += num_threads) {
             int cur_c = i % _c;
             if (pre_c != cur_c) {
@@ -853,28 +889,31 @@ class FusedScaleBiasAddReluFunction(function_node.FunctionNode):
                     atomicAdd(&sm_g_scale[pre_c].x, my_g_scale.x);
                     atomicAdd(&sm_g_scale[pre_c].y, my_g_scale.y);
                 }
+                scale_c.x = (float)scale[cur_c].x;
+                scale_c.y = (float)scale[cur_c].y;
                 my_g_bias.x  = 0.0;
                 my_g_bias.y  = 0.0;
                 my_g_scale.x = 0.0;
                 my_g_scale.y = 0.0;
             }
             pre_c = cur_c;
-
-            float2 _x = {(float)x[i].x, (float)x[i].y};
-            float2 _z = {(float)z[i].x, (float)z[i].y};
-            float2 _gz = {(float)gz[i].x, (float)gz[i].y};
-            if (_z.x <= 0.0) _gz.x = 0.0;
-            if (_z.y <= 0.0) _gz.y = 0.0;
-            my_g_bias.x  += _gz.x;
-            my_g_bias.y  += _gz.y;
-            my_g_scale.x += _gz.x * _x.x;
-            my_g_scale.y += _gz.y * _x.y;
-            _h2_tmp.x = (half)(_gz.x * (float)scale[cur_c].x);
-            _h2_tmp.y = (half)(_gz.y * (float)scale[cur_c].y);
-            gx[i] = _h2_tmp;
-            _h2_tmp.x = (half)_gz.x;
-            _h2_tmp.y = (half)_gz.y;
-            gy[i] = _h2_tmp;
+            float2 x_i = {(float)x[i].x, (float)x[i].y};
+            float2 z_i = {(float)z[i].x, (float)z[i].y};
+            float2 gz_i = {(float)gz[i].x, (float)gz[i].y};
+            if (z_i.x <= 0.0) gz_i.x = 0.0;
+            if (z_i.y <= 0.0) gz_i.y = 0.0;
+            my_g_bias.x  += gz_i.x;
+            my_g_bias.y  += gz_i.y;
+            my_g_scale.x += gz_i.x * x_i.x;
+            my_g_scale.y += gz_i.y * x_i.y;
+            half2 gx_i;
+            gx_i.x = (half)(gz_i.x * scale_c.x);
+            gx_i.y = (half)(gz_i.y * scale_c.y);
+            gx[i] = gx_i;
+            half2 gy_i;
+            gy_i.x = (half)gz_i.x;
+            gy_i.y = (half)gz_i.y;
+            gy[i] = gy_i;
         }
         if (pre_c >= 0) {
             atomicAdd(&sm_g_bias[pre_c].x,  my_g_bias.x);
@@ -885,12 +924,14 @@ class FusedScaleBiasAddReluFunction(function_node.FunctionNode):
 
         __syncthreads();
         for (int i = threadIdx.x; i < _c; i += blockDim.x) {
-            _h2_tmp.x = (half)sm_g_bias[i].x;
-            _h2_tmp.y = (half)sm_g_bias[i].y;
-            atomicAdd(&g_bias[i], _h2_tmp);
-            _h2_tmp.x = (half)sm_g_scale[i].x;
-            _h2_tmp.y = (half)sm_g_scale[i].y;
-            atomicAdd(&g_scale[i], _h2_tmp);
+            half2 g_bias_i;
+            g_bias_i.x = (half)sm_g_bias[i].x;
+            g_bias_i.y = (half)sm_g_bias[i].y;
+            atomicAdd(&g_bias[i], g_bias_i);
+            half2 g_scale_i;
+            g_scale_i.x = (half)sm_g_scale[i].x;
+            g_scale_i.y = (half)sm_g_scale[i].y;
+            atomicAdd(&g_scale[i], g_scale_i);
         }
     }
     ''', 'cupy_FSBAR_backward')
