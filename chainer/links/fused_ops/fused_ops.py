@@ -79,13 +79,13 @@ bn_decay=0.9, bn_eps=2e-5):
     def forward(self, x, scale=None, bias=None, **kwargs):
         if configuration.config.train:
             ret = fused_ops.fused_scale_bias_act_conv_bn(
-                x, self.W, self.gamma, self.beta, scale=scale, bias=bias,
+                x, scale, bias, self.W, self.gamma, self.beta,
                 stride=self.stride, pad=self.pad,
                 bn_eps=self.bn_eps, bn_decay=self.bn_decay,
                 running_mean=self.running_mean, running_var=self.running_var)
         else:
             ret = fused_ops.fused_scale_bias_act_conv_bn_inference(
-                x, self.W, self.gamma, self.beta, scale=scale, bias=bias,
+                x, scale, bias, self.W, self.gamma, self.beta,
                 stride=self.stride, pad=self.pad,
                 bn_eps=self.bn_eps,
                 running_mean=self.running_mean, running_var=self.running_var)
