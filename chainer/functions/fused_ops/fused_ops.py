@@ -386,7 +386,7 @@ class FusedScaleBiasActConvBnFunction(function_node.FunctionNode):
             # reference
             _x = scale * x + bias
             _gx = gx
-            _gx[_x < 0] = 0
+            _gx[_x <= 0] = 0
             g_bias = _gx
             g_bias = cupy.sum(g_bias, axis=(0, 1, 2)).reshape((_c,))
             g_scale = _gx * x
@@ -442,10 +442,10 @@ class FusedScaleBiasActConvBnFunction(function_node.FunctionNode):
             _y.x = ((float)y_i.x - mean_c.x) * invstd_c.x;
             _y.y = ((float)y_i.y - mean_c.y) * invstd_c.y;
             float2 _gy;
-            _gy.x = (float)gy_i.x
-                  - (g_beta_c.x + g_gamma_c.x * _y.x) / (_n * _h * _w);
-            _gy.y = (float)gy_i.y
-                  - (g_beta_c.y + g_gamma_c.y * _y.y) / (_n * _h * _w);
+            _gy.x = (float)gy_i.x;
+            _gy.y = (float)gy_i.y;
+            _gy.x -= (g_beta_c.x + g_gamma_c.x * _y.x) / (_n * _h * _w);
+            _gy.y -= (g_beta_c.y + g_gamma_c.y * _y.y) / (_n * _h * _w);
             half2 o_gy_i;
             o_gy_i.x = (half)_gy.x;
             o_gy_i.y = (half)_gy.y;
@@ -479,9 +479,8 @@ class FusedScaleBiasActConvBnFunction(function_node.FunctionNode):
         int pre_c = -1;
         float2  my_g_bias;
         float2  my_g_scale;
-        float2  my_scale;
-        float2  my_bias;
-        half2  _h2_tmp;
+        half2  my_scale;
+        half2  my_bias;
         for (int i = tid; i < num_elements; i += num_threads) {
             int cur_c = i % _c;
             if (pre_c != cur_c) {
@@ -495,29 +494,26 @@ class FusedScaleBiasActConvBnFunction(function_node.FunctionNode):
                 my_g_bias.y  = 0.0;
                 my_g_scale.x = 0.0;
                 my_g_scale.y = 0.0;
-                _h2_tmp = scale[cur_c];
-                my_scale.x = _h2_tmp.x;
-                my_scale.y = _h2_tmp.y;
-                _h2_tmp = bias[cur_c];
-                my_bias.x =  _h2_tmp.x;
-                my_bias.y =  _h2_tmp.y;
+                my_scale = scale[cur_c];
+                my_bias  = bias[cur_c];
             }
             pre_c = cur_c;
-
+            half2 x_i = x[i];
+            half2 gx_i = gx[i];
             float2 _x;
-            _x.x = my_scale.x * (float)x[i].x + my_bias.x;
-            _x.y = my_scale.y * (float)x[i].y + my_bias.y;
-            float2 _gx = {(float)gx[i].x, (float)gx[i].y};
+            _x.x = (float)my_scale.x * (float)x_i.x + (float)my_bias.x;
+            _x.y = (float)my_scale.y * (float)x_i.y + (float)my_bias.y;
+            float2 _gx = {(float)gx_i.x, (float)gx_i.y};
             if (_x.x <= 0.0) _gx.x = 0.0;
             if (_x.y <= 0.0) _gx.y = 0.0;
             my_g_bias.x  += _gx.x;
             my_g_bias.y  += _gx.y;
             my_g_scale.x += _gx.x * _x.x;
             my_g_scale.y += _gx.y * _x.y;
-
-            _h2_tmp.x = (half)(_gx.x * my_scale.x);
-            _h2_tmp.y = (half)(_gx.y * my_scale.y);
-            o_gx[i] = _h2_tmp;
+            half2 o_gx_i;
+            o_gx_i.x = (half)(_gx.x * (float)my_scale.x);
+            o_gx_i.y = (half)(_gx.y * (float)my_scale.y);
+            o_gx[i] = o_gx_i;
         }
         if (pre_c >= 0) {
             atomicAdd(&sm_g_bias[pre_c].x,  my_g_bias.x);
@@ -528,12 +524,14 @@ class FusedScaleBiasActConvBnFunction(function_node.FunctionNode):
 
         __syncthreads();
         for (int i = threadIdx.x; i < _c; i += blockDim.x) {
-            _h2_tmp.x = (half)sm_g_scale[i].x;
-            _h2_tmp.y = (half)sm_g_scale[i].y;
-            atomicAdd(&g_scale[i], _h2_tmp);
-            _h2_tmp.x = (half)sm_g_bias[i].x;
-            _h2_tmp.y = (half)sm_g_bias[i].y;
-            atomicAdd(&g_bias[i], _h2_tmp);
+            half2 g_scale_i;
+            g_scale_i.x = (half)sm_g_scale[i].x;
+            g_scale_i.y = (half)sm_g_scale[i].y;
+            atomicAdd(&g_scale[i], g_scale_i);
+            half2 g_bias_i;
+            g_bias_i.x = (half)sm_g_bias[i].x;
+            g_bias_i.y = (half)sm_g_bias[i].y;
+            atomicAdd(&g_bias[i], g_bias_i);
         }
     }
     ''', 'cupy_compute_grad_x_scale_bias')
@@ -796,8 +794,8 @@ class FusedScaleBiasAddReluFunction(function_node.FunctionNode):
             float2 _z;
             _z.x = (float)x_i.x * (float)scale_c.x + (float)bias_c.x + (float)y_i.x;
             _z.y = (float)x_i.y * (float)scale_c.y + (float)bias_c.y + (float)y_i.y;
-            if (_z.x < 0) _z.x = 0.0;
-            if (_z.y < 0) _z.y = 0.0;
+            if (_z.x <= 0) _z.x = 0.0;
+            if (_z.y <= 0) _z.y = 0.0;
             half2 z_i;
             z_i.x = (half)_z.x;
             z_i.y = (half)_z.y;
@@ -881,6 +879,11 @@ class FusedScaleBiasAddReluFunction(function_node.FunctionNode):
         float2  my_g_scale;
         float2 scale_c;
         for (int i = tid; i < num_elements; i += num_threads) {
+            float2 x_i = {(float)x[i].x, (float)x[i].y};
+            float2 z_i = {(float)z[i].x, (float)z[i].y};
+            float2 gz_i = {(float)gz[i].x, (float)gz[i].y};
+            if (z_i.x <= 0.0) gz_i.x = 0.0;
+            if (z_i.y <= 0.0) gz_i.y = 0.0;
             int cur_c = i % _c;
             if (pre_c != cur_c) {
                 if (pre_c >= 0) {
@@ -889,23 +892,20 @@ class FusedScaleBiasAddReluFunction(function_node.FunctionNode):
                     atomicAdd(&sm_g_scale[pre_c].x, my_g_scale.x);
                     atomicAdd(&sm_g_scale[pre_c].y, my_g_scale.y);
                 }
+                pre_c = cur_c;
                 scale_c.x = (float)scale[cur_c].x;
                 scale_c.y = (float)scale[cur_c].y;
-                my_g_bias.x  = 0.0;
-                my_g_bias.y  = 0.0;
-                my_g_scale.x = 0.0;
-                my_g_scale.y = 0.0;
+                my_g_bias.x  = gz_i.x;
+                my_g_bias.y  = gz_i.y;
+                my_g_scale.x = gz_i.x * x_i.x;
+                my_g_scale.y = gz_i.y * x_i.y;
             }
-            pre_c = cur_c;
-            float2 x_i = {(float)x[i].x, (float)x[i].y};
-            float2 z_i = {(float)z[i].x, (float)z[i].y};
-            float2 gz_i = {(float)gz[i].x, (float)gz[i].y};
-            if (z_i.x <= 0.0) gz_i.x = 0.0;
-            if (z_i.y <= 0.0) gz_i.y = 0.0;
-            my_g_bias.x  += gz_i.x;
-            my_g_bias.y  += gz_i.y;
-            my_g_scale.x += gz_i.x * x_i.x;
-            my_g_scale.y += gz_i.y * x_i.y;
+            else {
+                my_g_bias.x  += gz_i.x;
+                my_g_bias.y  += gz_i.y;
+                my_g_scale.x += gz_i.x * x_i.x;
+                my_g_scale.y += gz_i.y * x_i.y;
+            }
             half2 gx_i;
             gx_i.x = (half)(gz_i.x * scale_c.x);
             gx_i.y = (half)(gz_i.y * scale_c.y);
