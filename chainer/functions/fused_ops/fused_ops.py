@@ -365,52 +365,56 @@ class FusedScaleBiasActConvBnFunction(function_node.FunctionNode):
         if False:
             # reference
             _y = (y - self.saved_mean) * self.saved_invstd
-            gy = gy - (g_beta + g_gamma * _y) / (_n * _h * _w)
-            gy = gy.astype(y.dtype)
-            return gy, g_gamma, g_beta
+            _gy = gy - (g_beta + g_gamma * _y) / (_n * _h * _w)
+            _gy = _gy.astype(gy.dtype)
+            return _gy, g_gamma, g_beta
 
+        _gy = cupy.empty_like(gy)
         block_size = 256
         n_blocks = (_n * _h * _w * _c + block_size - 1) // block_size
         self._cupy_adjust_grad_y()(
             (n_blocks,), (block_size,),
-            (y, gamma, self.saved_mean, self.saved_invstd, g_gamma, g_beta,
-             gy,
+            (y, gy, gamma, g_gamma, g_beta, self.saved_mean, self.saved_invstd,
+             _gy,
              _n, _h, _w, _c))
-        return gy, g_gamma, g_beta
+        return _gy, g_gamma, g_beta
 
     def _compute_grad_x_scale_bias(self, x, gx, scale, bias):
         _n, _h, _w, _c = x.shape
         if False:
             # reference
             _x = scale * x + bias
-            gx[_x < 0] = 0
-            g_bias = gx
+            _gx = gx
+            _gx[_x < 0] = 0
+            g_bias = _gx
             g_bias = cupy.sum(g_bias, axis=(0, 1, 2)).reshape((_c,))
-            g_scale = gx * x
+            g_scale = _gx * x
             g_scale = cupy.sum(g_scale, axis=(0, 1, 2)).reshape((_c,))
-            gx = scale * gx
-            return gx, g_scale, g_bias
+            _gx = scale * _gx
+            return _gx, g_scale, g_bias
 
+        _gx = cupy.empty_like(gx)
         g_scale = cupy.zeros((_c,), dtype=scale.dtype)
         g_bias = cupy.zeros_like(g_scale)
-        block_size = 512
-        n_blocks = _get_num_SM() * 2
+
+        block_size = 1024
+        n_blocks = _get_num_SM()
         self._cupy_compute_grad_x_scale_bias()(
             (n_blocks,), (block_size,),
-            (x, scale, bias,
-             gx, g_scale, g_bias,
+            (x, gx, scale, bias,
+             _gx, g_scale, g_bias,
              _n, _h, _w, _c // 2))
-        return gx, g_scale, g_bias
+        return _gx, g_scale, g_bias
 
     def _cupy_adjust_grad_y(self):
         return cupy.RawKernel(r'''
 #include <cuda_fp16.h>
     extern "C" __global__
     void cupy_adjust_grad_y(
-        const half *y, const float *gamma,
+        const half *y, const half *gy,
+        const float *gamma, const float *g_gamma, const float *g_beta,
         const float *mean, const float *invstd,
-        const float *g_gamma, const float *g_beta,
-        half *gy,
+        half *o_gy,
         int _n, int _h, int _w, int _c)
         {
             int i = threadIdx.x + blockDim.x * blockIdx.x;
@@ -420,7 +424,7 @@ class FusedScaleBiasActConvBnFunction(function_node.FunctionNode):
             float _y = ((float)y[i] - mean[c]) * invstd[c];
             float _gy = (float)gy[i]
                       - (g_beta[c] + g_gamma[c] * _y) / (_n * _h * _w);
-            gy[i] = (half)_gy;
+            o_gy[i] = (half)_gy;
         }
         ''', 'cupy_adjust_grad_y')
 
@@ -429,8 +433,8 @@ class FusedScaleBiasActConvBnFunction(function_node.FunctionNode):
 #include <cuda_fp16.h>
     extern "C" __global__
     void cupy_compute_grad_x_scale_bias(
-        const half2 *x, const half2 *scale, const half2 *bias,
-        half2 *gx, half2 *g_scale, half2 *g_bias,
+        const half2 *x, const half2 *gx, const half2 *scale, const half2 *bias,
+        half2 *o_gx, half2 *g_scale, half2 *g_bias,
         int _n, int _h, int _w, int _c)
     {
         __shared__ float2 sm_g_bias[1024];
@@ -478,8 +482,8 @@ class FusedScaleBiasActConvBnFunction(function_node.FunctionNode):
             _x.x = my_scale.x * (float)x[i].x + my_bias.x;
             _x.y = my_scale.y * (float)x[i].y + my_bias.y;
             float2 _gx = {(float)gx[i].x, (float)gx[i].y};
-            if (_x.x < 0.0) _gx.x = 0.0;
-            if (_x.y < 0.0) _gx.y = 0.0;
+            if (_x.x <= 0.0) _gx.x = 0.0;
+            if (_x.y <= 0.0) _gx.y = 0.0;
             my_g_bias.x  += _gx.x;
             my_g_bias.y  += _gx.y;
             my_g_scale.x += _gx.x * _x.x;
@@ -487,7 +491,7 @@ class FusedScaleBiasActConvBnFunction(function_node.FunctionNode):
 
             _h2_tmp.x = (half)(_gx.x * my_scale.x);
             _h2_tmp.y = (half)(_gx.y * my_scale.y);
-            gx[i] = _h2_tmp;
+            o_gx[i] = _h2_tmp;
         }
         if (pre_c >= 0) {
             atomicAdd(&sm_g_bias[pre_c].x,  my_g_bias.x);
@@ -710,104 +714,189 @@ class FusedScaleBiasAddReluFunction(function_node.FunctionNode):
 
     _supports_nhwc_tensor_layout = True
 
-    def __init__(self, scale, bias):
-        if isinstance(scale, chainer.Variable):
-            scale = scale.data
-        if isinstance(bias, chainer.Variable):
-            bias = bias.data
-        self.scale = scale
-        self.bias = bias
+    def __init__(self):
+        pass
 
     def forward_gpu(self, inputs):
-        x, y = inputs
-        if False:
-            z = self.scale * x + self.bias + y
-            z[z <= 0] = 0
-        else:
-            x = cuda.cupy.ascontiguousarray(x)
-            y = cuda.cupy.ascontiguousarray(y)
-            z = cupy.empty_like(x)
-            scale = cuda.cupy.ascontiguousarray(self.scale)
-            bias = cuda.cupy.ascontiguousarray(self.bias)
-            _n, _h, _w, _c = z.shape
-            block_size = 256
-            n_blocks = (_n * _h * _w * _c + block_size - 1) // block_size
-            self._cupy_forward()(
-                (n_blocks,), (block_size,),
-                (x, scale, bias, y, z,
-                 _n, _h, _w, _c))
+        x, scale, bias, y = inputs
+        self.retain_inputs((0, 1))
         self.retain_outputs((0,))
-        return z,
-
-    def backward(self, indexes, grad_outputs):
-        gz, = grad_outputs
-        z, = self.get_retained_outputs()
         if False:
-            gz.data[z.data <= 0] = 0
-            gy = gz
-            gx = self.scale * gz
-        else:
-            z = cuda.cupy.ascontiguousarray(z.data)
-            gz = cuda.cupy.ascontiguousarray(gz.data)
-            scale = cuda.cupy.ascontiguousarray(self.scale)
-            gx = cupy.empty_like(gz)
-            gy = cupy.empty_like(gz)
-            _n, _h, _w, _c = gz.shape
-            block_size = 256
-            n_blocks = (_n * _h * _w * _c + block_size - 1) // block_size
-            self._cupy_backward()(
-                (n_blocks,), (block_size,),
-                (z, gz, scale, gx, gy,
-                 _n, _h, _w, _c))
-            gx = chainer.Variable(gx)
-            gy = chainer.Variable(gy)
-        return gx, gy
+            # reference
+            z = scale * x + bias + y
+            z[z <= 0] = 0
+            return z,
+
+        _n, _h, _w, _c = x.shape
+        x = cuda.cupy.ascontiguousarray(x)
+        y = cuda.cupy.ascontiguousarray(y)
+        bias = cuda.cupy.ascontiguousarray(bias)
+        scale = cuda.cupy.ascontiguousarray(scale)
+        z = cupy.empty_like(x)
+        block_size = 256
+        n_blocks = (_n * _h * _w * _c // 2 + block_size - 1) // block_size
+        self._cupy_forward()(
+            (n_blocks,), (block_size,),
+            (x, scale, bias, y,
+             z,
+             _n, _h, _w, _c // 2))
+        return z,
 
     def _cupy_forward(self):
         return cupy.RawKernel(r'''
 #include <cuda_fp16.h>
     extern "C" __global__
     void cupy_FSBAR_forward(
-        const half *x, const half *scale, const half *bias, const half *y,
-        half *z,
+        const half2 *x, const half2 *scale, const half2 *bias, const half2 *y,
+        half2 *z,
         int _n, int _h, int _w, int _c)
     {
         int i = threadIdx.x + blockDim.x * blockIdx.x;
         int num_elements = _n * _h * _w * _c;
         if (i >= num_elements) return;
         int c = i % _c;
-        float _z_ = (float)x[i] * (float)scale[c] + (float)bias[c] + (float)y[i];
-        if (_z_ < 0) _z_ = 0;
-        z[i] = (half)_z_;
+        half2 _x = x[i];
+        half2 _y = y[i];
+        half2 _bias = bias[c];
+        half2 _scale = scale[c];
+        float2 _z;
+        _z.x = (float)_x.x * (float)_scale.x + (float)_bias.x + (float)_y.x;
+        _z.y = (float)_x.y * (float)_scale.y + (float)_bias.y + (float)_y.y;
+        if (_z.x < 0) _z.x = 0.0;
+        if (_z.y < 0) _z.y = 0.0;
+        half2 h2_z;
+        h2_z.x = (half)_z.x;
+        h2_z.y = (half)_z.y;
+        z[i] = h2_z;
     }
     ''', 'cupy_FSBAR_forward')
+
+    def backward(self, indexes, grad_outputs):
+        gz, = grad_outputs
+        x, scale = self.get_retained_inputs()
+        z, = self.get_retained_outputs()
+        _n, _h, _w, _c = x.shape
+
+        x = cuda.cupy.ascontiguousarray(x.data)
+        z = cuda.cupy.ascontiguousarray(z.data)
+        gz = cuda.cupy.ascontiguousarray(gz.data)
+        scale = cuda.cupy.ascontiguousarray(scale.data)
+
+        if False:
+            # reference
+            _gz = gz
+            _gz[z <= 0] = 0
+            gy = _gz
+            g_bias = _gz
+            g_bias = cupy.sum(g_bias, axis=(0, 1, 2)).reshape((_c,))
+            g_scale = _gz * x
+            g_scale = cupy.sum(g_scale, axis=(0, 1, 2)).reshape((_c,))
+            gx = scale * _gz
+
+            gx = chainer.Variable(gx)
+            gy = chainer.Variable(gy)
+            g_scale = chainer.Variable(g_scale)
+            g_bias = chainer.Variable(g_bias)
+            return gx, g_scale, g_bias, gy
+
+        gx = cupy.empty_like(x)
+        gy = cupy.empty_like(gx)
+        g_scale = cupy.zeros((_c,), dtype=scale.dtype)
+        g_bias = cupy.zeros_like(g_scale)
+        block_size = 1024
+        n_blocks = _get_num_SM()
+        assert _c <= 2048
+        self._cupy_backward()(
+            (n_blocks,), (block_size,),
+            (x, z, gz, scale,
+             gx, g_scale, g_bias, gy,
+             _n, _h, _w, _c // 2))
+
+        gx = chainer.Variable(gx)
+        gy = chainer.Variable(gy)
+        g_bias = chainer.Variable(g_bias)
+        g_scale = chainer.Variable(g_scale)
+        return gx, g_scale, g_bias, gy
 
     def _cupy_backward(self):
         return cupy.RawKernel(r'''
 #include <cuda_fp16.h>
     extern "C" __global__
     void cupy_FSBAR_backward(
-        const half *z, const half *gz, const half *scale,
-        half *gx, half *gy,
+        const half2 *x, const half2 *z, const half2 *gz, const half2 *scale,
+        half2 *gx, half2 *g_scale, half2 *g_bias, half2 *gy,
         int _n, int _h, int _w, int _c)
     {
-        int i = threadIdx.x + blockDim.x * blockIdx.x;
-        int num_elements = _n * _h * _w * _c;
-        if (i >= num_elements) return;
-        int c = i % _c;
-        if ((float)z[i] > 0.0) {
-            gy[i] = gz[i];
-            gx[i] = (half)((float)gy[i] * (float)scale[c]);
+        __shared__ float2 sm_g_bias[1024];
+        __shared__ float2 sm_g_scale[1024];
+        for (int i = threadIdx.x; i < _c; i += blockDim.x) {
+            sm_g_bias[i].x = 0.0;
+            sm_g_bias[i].y = 0.0;
+            sm_g_scale[i].x = 0.0;
+            sm_g_scale[i].y = 0.0;
         }
-        else {
-            gy[i] = (half)0.0;
-            gx[i] = (half)0.0;
+        __syncthreads();
+
+        int tid = threadIdx.x + blockDim.x * blockIdx.x;
+        int num_threads = blockDim.x * gridDim.x;
+        int num_elements = _n * _h * _w * _c;
+        int pre_c = -1;
+        float2  my_g_bias;
+        float2  my_g_scale;
+        half2  _h2_tmp;
+        for (int i = tid; i < num_elements; i += num_threads) {
+            int cur_c = i % _c;
+            if (pre_c != cur_c) {
+                if (pre_c >= 0) {
+                    atomicAdd(&sm_g_bias[pre_c].x,  my_g_bias.x);
+                    atomicAdd(&sm_g_bias[pre_c].y,  my_g_bias.y);
+                    atomicAdd(&sm_g_scale[pre_c].x, my_g_scale.x);
+                    atomicAdd(&sm_g_scale[pre_c].y, my_g_scale.y);
+                }
+                my_g_bias.x  = 0.0;
+                my_g_bias.y  = 0.0;
+                my_g_scale.x = 0.0;
+                my_g_scale.y = 0.0;
+            }
+            pre_c = cur_c;
+
+            float2 _x = {(float)x[i].x, (float)x[i].y};
+            float2 _z = {(float)z[i].x, (float)z[i].y};
+            float2 _gz = {(float)gz[i].x, (float)gz[i].y};
+            if (_z.x <= 0.0) _gz.x = 0.0;
+            if (_z.y <= 0.0) _gz.y = 0.0;
+            my_g_bias.x  += _gz.x;
+            my_g_bias.y  += _gz.y;
+            my_g_scale.x += _gz.x * _x.x;
+            my_g_scale.y += _gz.y * _x.y;
+            _h2_tmp.x = (half)(_gz.x * (float)scale[cur_c].x);
+            _h2_tmp.y = (half)(_gz.y * (float)scale[cur_c].y);
+            gx[i] = _h2_tmp;
+            _h2_tmp.x = (half)_gz.x;
+            _h2_tmp.y = (half)_gz.y;
+            gy[i] = _h2_tmp;
+        }
+        if (pre_c >= 0) {
+            atomicAdd(&sm_g_bias[pre_c].x,  my_g_bias.x);
+            atomicAdd(&sm_g_bias[pre_c].y,  my_g_bias.y);
+            atomicAdd(&sm_g_scale[pre_c].x, my_g_scale.x);
+            atomicAdd(&sm_g_scale[pre_c].y, my_g_scale.y);
+        }
+
+        __syncthreads();
+        for (int i = threadIdx.x; i < _c; i += blockDim.x) {
+            _h2_tmp.x = (half)sm_g_bias[i].x;
+            _h2_tmp.y = (half)sm_g_bias[i].y;
+            atomicAdd(&g_bias[i], _h2_tmp);
+            _h2_tmp.x = (half)sm_g_scale[i].x;
+            _h2_tmp.y = (half)sm_g_scale[i].y;
+            atomicAdd(&g_scale[i], _h2_tmp);
         }
     }
     ''', 'cupy_FSBAR_backward')
 
 
 def fused_scale_bias_add_relu(x, scale, bias, y):
-    fnode = FusedScaleBiasAddReluFunction(scale, bias)
-    z, = fnode.apply((x, y))
+    fnode = FusedScaleBiasAddReluFunction()
+    z, = fnode.apply((x, scale, bias, y))
     return z
