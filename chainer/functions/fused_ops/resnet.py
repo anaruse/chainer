@@ -31,12 +31,13 @@ def _pair(x):
 _num_SM = [None] * 16
 
 
-def _get_num_SM():
-    dev_id = cupy.cuda.runtime.getDevice()
-    if _num_SM[dev_id] is None:
-        _num_SM[dev_id] = cupy.cuda.runtime.deviceGetAttribute(
-            cupy.cuda.runtime.cudaDevAttrMultiProcessorCount, dev_id)
-    return _num_SM[dev_id]
+def _get_num_SM(device_id=None):
+    if device_id is None:
+        device_id = cupy.cuda.runtime.getDevice()
+    if _num_SM[device_id] is None:
+        _num_SM[device_id] = cupy.cuda.runtime.deviceGetAttribute(
+            cupy.cuda.runtime.cudaDevAttrMultiProcessorCount, device_id)
+    return _num_SM[device_id]
 
 
 class ResNetBottleNeckFunction(function_node.FunctionNode):
@@ -45,8 +46,8 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
     cover_all = False
     tensor_layout = 'NHWC'
     dilate = 1
-    bn_mode = libcudnn.CUDNN_BATCHNORM_SPATIAL
-    # bn_mode = libcudnn.CUDNN_BATCHNORM_SPATIAL_PERSISTENT
+    # bn_mode = libcudnn.CUDNN_BATCHNORM_SPATIAL
+    bn_mode = libcudnn.CUDNN_BATCHNORM_SPATIAL_PERSISTENT
     ptr_ph = libcudnn.CUDNN_PTR_16B_ALIGNED
 
     # reference = True
@@ -281,7 +282,7 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
             _n, _h, _w, _c = x.shape
             z = cupy.empty_like(x)
             block_size = 256
-            n_blocks = _get_num_SM() * 4
+            n_blocks = _get_num_SM(x.data.device_id) * 4
             self._fw_scale_bias_add_relu()(
                 (n_blocks,), (block_size,),
                 (x, scale, bias, y,
@@ -348,15 +349,15 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
         y = cuda.cupy.ascontiguousarray(y.data)
         gy = cuda.cupy.ascontiguousarray(gy.data)
 
-        gx3, g_scale3, g_bias3, _gx0 = self.bw_scale_bias_add_relu(
+        gx3, g_gamma2, g_beta2, _gx0 = self.bw_scale_bias_add_relu(
             self.x3, self.scale3, self.bias3, y, gy)
 
         ret = self.bw_scale_bias_relu_conv_bnorm(
             2,
             self.x2, self.scale2, self.bias2, W2,
             self.x3, self.scale3, self.bias3,
-            gx3, g_scale3, g_bias3)
-        gx2, g_scale2, g_bias2, gW2, g_gamma2, g_beta2 = ret
+            gx3, g_gamma2, g_beta2)
+        gx2, g_gamma1, g_beta1, gW2 = ret
         del gx3
         self.x3 = None
 
@@ -364,8 +365,8 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
             1,
             self.x1, self.scale1, self.bias1, W1,
             self.x2, self.scale2, self.bias2,
-            gx2, g_scale2, g_bias2)
-        gx1, g_scale1, g_bias1, gW1, g_gamma1, g_beta1 = ret
+            gx2, g_gamma1, g_beta1)
+        gx1, g_gamma0, g_beta0, gW1 = ret
         del gx2
         self.x2 = None
 
@@ -373,8 +374,8 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
             0,
             x0, None, None, W0,
             self.x1, self.scale1, self.bias1,
-            gx1, g_scale1, g_bias1)
-        gx0, _, _, gW0, g_gamma0, g_beta0 = ret
+            gx1, g_gamma0, g_beta0)
+        gx0, _, _, gW0 = ret
         del gx1
         self.x1 = None
 
@@ -406,21 +407,24 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
             gy = gz
             g_bias = cupy.sum(gz, axis=(0, 1, 2)).reshape((_c,))
             g_scale = cupy.sum(gz * x, axis=(0, 1, 2)).reshape((_c,))
+            g_beta = g_bias.astype(numpy.float32)
+            g_gamma = g_scale * self.saved_invstd[2]
             gx = gz * scale
         else:
-            g_scale = cupy.zeros_like(scale)
-            g_bias = cupy.zeros_like(bias)
+            g_gamma = cupy.zeros((_c,), dtype=numpy.float32)
+            g_beta = cupy.zeros((_c,), dtype=numpy.float32)
             gy = cupy.empty_like(x)
             gx = cupy.empty_like(x)
             block_size = 1024
-            n_blocks = _get_num_SM()
+            n_blocks = _get_num_SM(x.data.device_id)
             assert _c <= 2048
             self._bw_scale_bias_add_relu()(
                 (n_blocks,), (block_size,),
-                (x, scale, bias, z, gz,
-                 gx, g_scale, g_bias, gy,
+                (x, scale, bias, z, gz, self.saved_invstd[2],
+                 gx, g_gamma, g_beta, gy,
                  _n, _h, _w, _c // 2))
-        return gx, g_scale, g_bias, gy
+
+        return gx, g_gamma, g_beta, gy
 
     def _bw_scale_bias_add_relu(self):
         return cupy.RawKernel(r'''
@@ -428,17 +432,17 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
     extern "C" __global__
     void cupy_resnet_bw_SBAR_gX_gScale(
         const half2 *x, const half2 *scale, const half2 *bias,
-        const half2 *z, const half2 *gz,
-        half2 *gx, half2 *g_scale, half2 *g_bias, half2 *gy,
+        const half2 *z, const half2 *gz, const float2 *invstd,
+        half2 *gx, float2 *g_gamma, float2 *g_beta, half2 *gy,
         int _n, int _h, int _w, int _c)
     {
-        __shared__ float2 sm_g_bias[1024];
-        __shared__ float2 sm_g_scale[1024];
+        __shared__ float2 sm_g_beta[1024];
+        __shared__ float2 sm_g_gamma[1024];
         for (int i = threadIdx.x; i < _c; i += blockDim.x) {
-            sm_g_bias[i].x = 0.0;
-            sm_g_bias[i].y = 0.0;
-            sm_g_scale[i].x = 0.0;
-            sm_g_scale[i].y = 0.0;
+            sm_g_beta[i].x = 0.0;
+            sm_g_beta[i].y = 0.0;
+            sm_g_gamma[i].x = 0.0;
+            sm_g_gamma[i].y = 0.0;
         }
         __syncthreads();
 
@@ -446,9 +450,9 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
         int num_threads = blockDim.x * gridDim.x;
         int num_elements = _n * _h * _w * _c;
         int pre_c = -1;
-        float2  my_g_bias;
-        float2  my_g_scale;
-        float2 scale_c;
+        float2  my_g_beta;
+        float2  my_g_gamma;
+        float2  scale_c;
         for (int i = tid; i < num_elements; i += num_threads) {
             float2 x_i = {(float)x[i].x, (float)x[i].y};
             float2 z_i = {(float)z[i].x, (float)z[i].y};
@@ -458,24 +462,24 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
             int cur_c = i % _c;
             if (pre_c != cur_c) {
                 if (pre_c >= 0) {
-                    atomicAdd(&sm_g_bias[pre_c].x,  my_g_bias.x);
-                    atomicAdd(&sm_g_bias[pre_c].y,  my_g_bias.y);
-                    atomicAdd(&sm_g_scale[pre_c].x, my_g_scale.x);
-                    atomicAdd(&sm_g_scale[pre_c].y, my_g_scale.y);
+                    atomicAdd(&sm_g_beta[pre_c].x,  my_g_beta.x);
+                    atomicAdd(&sm_g_beta[pre_c].y,  my_g_beta.y);
+                    atomicAdd(&sm_g_gamma[pre_c].x, my_g_gamma.x);
+                    atomicAdd(&sm_g_gamma[pre_c].y, my_g_gamma.y);
                 }
                 pre_c = cur_c;
                 scale_c.x = (float)scale[cur_c].x;
                 scale_c.y = (float)scale[cur_c].y;
-                my_g_bias.x  = gz_i.x;
-                my_g_bias.y  = gz_i.y;
-                my_g_scale.x = gz_i.x * x_i.x;
-                my_g_scale.y = gz_i.y * x_i.y;
+                my_g_beta.x  = gz_i.x;
+                my_g_beta.y  = gz_i.y;
+                my_g_gamma.x = gz_i.x * x_i.x;
+                my_g_gamma.y = gz_i.y * x_i.y;
             }
             else {
-                my_g_bias.x  += gz_i.x;
-                my_g_bias.y  += gz_i.y;
-                my_g_scale.x += gz_i.x * x_i.x;
-                my_g_scale.y += gz_i.y * x_i.y;
+                my_g_beta.x  += gz_i.x;
+                my_g_beta.y  += gz_i.y;
+                my_g_gamma.x += gz_i.x * x_i.x;
+                my_g_gamma.y += gz_i.y * x_i.y;
             }
             half2 gx_i;
             gx_i.x = (half)(gz_i.x * scale_c.x);
@@ -487,22 +491,18 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
             gy[i] = gy_i;
         }
         if (pre_c >= 0) {
-            atomicAdd(&sm_g_bias[pre_c].x,  my_g_bias.x);
-            atomicAdd(&sm_g_bias[pre_c].y,  my_g_bias.y);
-            atomicAdd(&sm_g_scale[pre_c].x, my_g_scale.x);
-            atomicAdd(&sm_g_scale[pre_c].y, my_g_scale.y);
+            atomicAdd(&sm_g_beta[pre_c].x,  my_g_beta.x);
+            atomicAdd(&sm_g_beta[pre_c].y,  my_g_beta.y);
+            atomicAdd(&sm_g_gamma[pre_c].x, my_g_gamma.x);
+            atomicAdd(&sm_g_gamma[pre_c].y, my_g_gamma.y);
         }
 
         __syncthreads();
         for (int i = threadIdx.x; i < _c; i += blockDim.x) {
-            half2 g_bias_i;
-            g_bias_i.x = (half)sm_g_bias[i].x;
-            g_bias_i.y = (half)sm_g_bias[i].y;
-            atomicAdd(&g_bias[i], g_bias_i);
-            half2 g_scale_i;
-            g_scale_i.x = (half)sm_g_scale[i].x;
-            g_scale_i.y = (half)sm_g_scale[i].y;
-            atomicAdd(&g_scale[i], g_scale_i);
+            atomicAdd(&g_beta[i].x, sm_g_beta[i].x);
+            atomicAdd(&g_beta[i].y, sm_g_beta[i].y);
+            atomicAdd(&g_gamma[i].x, sm_g_gamma[i].x * invstd[i].x);
+            atomicAdd(&g_gamma[i].y, sm_g_gamma[i].y * invstd[i].y);
         }
     }
     ''', 'cupy_resnet_bw_SBAR_gX_gScale')
@@ -510,7 +510,7 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
     def bw_scale_bias_relu_conv_bnorm(self, lid,
                                       x, i_scale, i_bias, W,
                                       y, o_scale, o_bias,
-                                      gy, go_scale, go_bias):
+                                      gy, g_gamma, g_beta):
         '''
         y = conv(relu(x * i_scale + i_bias), W)
         o_scale, o_bias = f(y, gamma, beta)
@@ -531,10 +531,6 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
         bn_mode = self.bn_mode
         ptr_ph = self.ptr_ph
         
-        # compute g_gamma and g_beta
-        g_gamma = go_scale * self.saved_invstd[lid]
-        g_beta = go_bias.astype(g_gamma.dtype)
-
         # adjust gy
         if self.reference:
             _y = (y - self.saved_mean[lid]) * self.saved_invstd[lid]
@@ -544,7 +540,7 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
         else:
             _n, _h, _w, _c = y.shape
             block_size = 256
-            n_blocks = _get_num_SM() * 4
+            n_blocks = _get_num_SM(y.data.device_id) * 4
             self._bw_scale_bias_relu_conv_bnorm_gY()(
                 (n_blocks,), (block_size,),
                 (y, g_gamma, g_beta,
@@ -612,8 +608,8 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
 
         # compute gx, gi_scale and gi_bias
         if i_scale is None:
-            gi_bias = None
-            gi_scale = None
+            g_gamma = None
+            g_beta = None
         else:
             if self.reference:
                 _x = x * i_scale + i_bias
@@ -621,20 +617,22 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
                 gi_bias = cupy.sum(gx, axis=(0, 1, 2)).reshape((x_c,))
                 gi_scale = cupy.sum(gx * x, axis=(0, 1, 2)).reshape((x_c,))
                 gx = gx * i_scale
+                g_gamma = gi_scale * self.saved_invstd[lid-1]
+                g_beta = gi_bias.astype(g_gamma.dtype)
             else:
                 _n, _h, _w, _c = x.shape
-                gi_scale = cupy.zeros_like(i_scale)
-                gi_bias = cupy.zeros_like(i_bias)
+                g_gamma = cupy.zeros((x_c,), dtype=numpy.float32)
+                g_beta = cupy.zeros((x_c,), dtype=numpy.float32)
                 block_size = 1024
-                n_blocks = _get_num_SM()
+                n_blocks = _get_num_SM(x.data.device_id)
                 assert _c <= 2048
                 self._bw_scale_bias_relu_conv_bnorm_gX_gScale_gBias()(
                     (n_blocks,), (block_size,),
-                    (x, i_scale, i_bias,
-                     gx, gi_scale, gi_bias,
+                    (x, i_scale, i_bias, self.saved_invstd[lid-1],
+                     gx, g_gamma, g_beta,
                      _n, _h, _w, _c // 2))
 
-        return gx, gi_scale, gi_bias, gW, g_gamma, g_beta
+        return gx, g_gamma, g_beta, gW
 
     def _bw_scale_bias_relu_conv_bnorm_gY(self):
         return cupy.RawKernel(r'''
@@ -686,16 +684,17 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
     extern "C" __global__
     void cupy_resnet_bw_SBRCB_gX_gScale(
         const half2 *x, const half2 *scale, const half2 *bias,
-        half2 *gx, half2 *g_scale, half2 *g_bias,
+        const float2 *invstd,
+        half2 *gx, float2 *g_gamma, float2 *g_beta,
         int _n, int _h, int _w, int _c)
     {
-        __shared__ float2 sm_g_bias[1024];
-        __shared__ float2 sm_g_scale[1024];
+        __shared__ float2 sm_g_beta[1024];
+        __shared__ float2 sm_g_gamma[1024];
         for (int i = threadIdx.x; i < _c; i += blockDim.x) {
-            sm_g_bias[i].x = 0.0;
-            sm_g_bias[i].y = 0.0;
-            sm_g_scale[i].x = 0.0;
-            sm_g_scale[i].y = 0.0;
+            sm_g_beta[i].x = 0.0;
+            sm_g_beta[i].y = 0.0;
+            sm_g_gamma[i].x = 0.0;
+            sm_g_gamma[i].y = 0.0;
         }
         __syncthreads();
 
@@ -703,23 +702,23 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
         int num_threads = blockDim.x * gridDim.x;
         int num_elements = _n * _h * _w * _c;
         int pre_c = -1;
-        float2  my_g_bias;
-        float2  my_g_scale;
+        float2  my_g_beta;
+        float2  my_g_gamma;
         half2  my_scale;
         half2  my_bias;
         for (int i = tid; i < num_elements; i += num_threads) {
             int cur_c = i % _c;
             if (pre_c != cur_c) {
                 if (pre_c >= 0) {
-                    atomicAdd(&sm_g_bias[pre_c].x,  my_g_bias.x);
-                    atomicAdd(&sm_g_bias[pre_c].y,  my_g_bias.y);
-                    atomicAdd(&sm_g_scale[pre_c].x, my_g_scale.x);
-                    atomicAdd(&sm_g_scale[pre_c].y, my_g_scale.y);
+                    atomicAdd(&sm_g_beta[pre_c].x,  my_g_beta.x);
+                    atomicAdd(&sm_g_beta[pre_c].y,  my_g_beta.y);
+                    atomicAdd(&sm_g_gamma[pre_c].x, my_g_gamma.x);
+                    atomicAdd(&sm_g_gamma[pre_c].y, my_g_gamma.y);
                 }
-                my_g_bias.x  = 0.0;
-                my_g_bias.y  = 0.0;
-                my_g_scale.x = 0.0;
-                my_g_scale.y = 0.0;
+                my_g_beta.x  = 0.0;
+                my_g_beta.y  = 0.0;
+                my_g_gamma.x = 0.0;
+                my_g_gamma.y = 0.0;
                 my_scale = scale[cur_c];
                 my_bias  = bias[cur_c];
             }
@@ -732,31 +731,27 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
             float2 _gx = {(float)gx_i.x, (float)gx_i.y};
             if (_x.x <= 0.0) _gx.x = 0.0;
             if (_x.y <= 0.0) _gx.y = 0.0;
-            my_g_bias.x  += _gx.x;
-            my_g_bias.y  += _gx.y;
-            my_g_scale.x += _gx.x * _x.x;
-            my_g_scale.y += _gx.y * _x.y;
+            my_g_beta.x  += _gx.x;
+            my_g_beta.y  += _gx.y;
+            my_g_gamma.x += _gx.x * _x.x;
+            my_g_gamma.y += _gx.y * _x.y;
             gx_i.x = (half)(_gx.x * (float)my_scale.x);
             gx_i.y = (half)(_gx.y * (float)my_scale.y);
             gx[i] = gx_i;
         }
         if (pre_c >= 0) {
-            atomicAdd(&sm_g_bias[pre_c].x,  my_g_bias.x);
-            atomicAdd(&sm_g_bias[pre_c].y,  my_g_bias.y);
-            atomicAdd(&sm_g_scale[pre_c].x, my_g_scale.x);
-            atomicAdd(&sm_g_scale[pre_c].y, my_g_scale.y);
+            atomicAdd(&sm_g_beta[pre_c].x,  my_g_beta.x);
+            atomicAdd(&sm_g_beta[pre_c].y,  my_g_beta.y);
+            atomicAdd(&sm_g_gamma[pre_c].x, my_g_gamma.x);
+            atomicAdd(&sm_g_gamma[pre_c].y, my_g_gamma.y);
         }
 
         __syncthreads();
         for (int i = threadIdx.x; i < _c; i += blockDim.x) {
-            half2 g_scale_i;
-            g_scale_i.x = (half)sm_g_scale[i].x;
-            g_scale_i.y = (half)sm_g_scale[i].y;
-            atomicAdd(&g_scale[i], g_scale_i);
-            half2 g_bias_i;
-            g_bias_i.x = (half)sm_g_bias[i].x;
-            g_bias_i.y = (half)sm_g_bias[i].y;
-            atomicAdd(&g_bias[i], g_bias_i);
+            atomicAdd(&g_beta[i].x, sm_g_beta[i].x);
+            atomicAdd(&g_beta[i].y, sm_g_beta[i].y);
+            atomicAdd(&g_gamma[i].x, sm_g_gamma[i].x * invstd[i].x);
+            atomicAdd(&g_gamma[i].y, sm_g_gamma[i].y * invstd[i].y);
         }
     }
     ''', 'cupy_resnet_bw_SBRCB_gX_gScale')
