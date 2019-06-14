@@ -49,6 +49,9 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
     # bn_mode = libcudnn.CUDNN_BATCHNORM_SPATIAL_PERSISTENT
     ptr_ph = libcudnn.CUDNN_PTR_16B_ALIGNED
 
+    # reference = True
+    reference = False
+    
     def __init__(self, running_mean_set, running_var_set,
                  bn_eps=2.5e-5, bn_decay=0.9):
         self.bn_eps = bn_eps
@@ -271,10 +274,58 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
         '''
         z = x * scale + bias + y
         '''
-        z = x * scale + bias + y
-        z[z <= 0] = 0
+        if self.reference:
+            z = x * scale + bias + y
+            z[z <= 0] = 0
+        else:
+            _n, _h, _w, _c = x.shape
+            z = cupy.empty_like(x)
+            block_size = 256
+            n_blocks = _get_num_SM() * 4
+            self._fw_scale_bias_add_relu()(
+                (n_blocks,), (block_size,),
+                (x, scale, bias, y,
+                 z,
+                 _n, _h, _w, _c // 2))
         return z
 
+    def _fw_scale_bias_add_relu(self):
+        return cupy.RawKernel(r'''
+#include <cuda_fp16.h>
+    extern "C" __global__
+    void cupy_resnet_fw_scale_bias_add_relu(
+        const half2 *x, const half2 *scale, const half2 *bias, const half2 *y,
+        half2 *z,
+        int _n, int _h, int _w, int _c)
+    {
+        int tid = threadIdx.x + blockDim.x * blockIdx.x;
+        int num_threads = blockDim.x * gridDim.x;
+        int num_elements = _n * _h * _w * _c;
+        half2 bias_c;
+        half2 scale_c;
+        int pre_c = -1;
+        for (int i = tid; i < num_elements; i += num_threads) {
+            int c = i % _c;
+            if (pre_c != c) {
+                bias_c = bias[c];
+                scale_c = scale[c];
+            }
+            pre_c = c;
+            half2 x_i = x[i];
+            half2 y_i = y[i];
+            float2 _z;
+            _z.x = (float)x_i.x * (float)scale_c.x + (float)bias_c.x + (float)y_i.x;
+            _z.y = (float)x_i.y * (float)scale_c.y + (float)bias_c.y + (float)y_i.y;
+            if (_z.x <= 0) _z.x = 0.0;
+            if (_z.y <= 0) _z.y = 0.0;
+            half2 z_i;
+            z_i.x = (half)_z.x;
+            z_i.y = (half)_z.y;
+            z[i] = z_i;
+        }
+    }
+    ''', 'cupy_resnet_fw_scale_bias_add_relu')
+    
     def backward(self, indexes, grad_outputs):
         inputs = self.get_retained_inputs()
         x0 = inputs[0]
@@ -350,14 +401,112 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
         z = x * scale + bias + y
         '''
         _n, _h, _w, _c = x.shape
-        gz[z <= 0] = 0
-        gy = gz
-        g_bias = cupy.sum(gz, axis=(0, 1, 2)).reshape((_c,))
-        g_scale = cupy.sum(gz * x, axis=(0, 1, 2)).reshape((_c,))
-        # gx = gz * scale  # test(A)
-        gx = gz  # test(A)
+        if self.reference:
+            gz[z <= 0] = 0
+            gy = gz
+            g_bias = cupy.sum(gz, axis=(0, 1, 2)).reshape((_c,))
+            g_scale = cupy.sum(gz * x, axis=(0, 1, 2)).reshape((_c,))
+            gx = gz * scale
+        else:
+            g_scale = cupy.zeros_like(scale)
+            g_bias = cupy.zeros_like(bias)
+            gy = cupy.empty_like(x)
+            gx = cupy.empty_like(x)
+            block_size = 1024
+            n_blocks = _get_num_SM()
+            assert _c <= 2048
+            self._bw_scale_bias_add_relu()(
+                (n_blocks,), (block_size,),
+                (x, scale, bias, z, gz,
+                 gx, g_scale, g_bias, gy,
+                 _n, _h, _w, _c // 2))
         return gx, g_scale, g_bias, gy
 
+    def _bw_scale_bias_add_relu(self):
+        return cupy.RawKernel(r'''
+#include <cuda_fp16.h>
+    extern "C" __global__
+    void cupy_resnet_bw_SBAR_gX_gScale(
+        const half2 *x, const half2 *scale, const half2 *bias,
+        const half2 *z, const half2 *gz,
+        half2 *gx, half2 *g_scale, half2 *g_bias, half2 *gy,
+        int _n, int _h, int _w, int _c)
+    {
+        __shared__ float2 sm_g_bias[1024];
+        __shared__ float2 sm_g_scale[1024];
+        for (int i = threadIdx.x; i < _c; i += blockDim.x) {
+            sm_g_bias[i].x = 0.0;
+            sm_g_bias[i].y = 0.0;
+            sm_g_scale[i].x = 0.0;
+            sm_g_scale[i].y = 0.0;
+        }
+        __syncthreads();
+
+        int tid = threadIdx.x + blockDim.x * blockIdx.x;
+        int num_threads = blockDim.x * gridDim.x;
+        int num_elements = _n * _h * _w * _c;
+        int pre_c = -1;
+        float2  my_g_bias;
+        float2  my_g_scale;
+        float2 scale_c;
+        for (int i = tid; i < num_elements; i += num_threads) {
+            float2 x_i = {(float)x[i].x, (float)x[i].y};
+            float2 z_i = {(float)z[i].x, (float)z[i].y};
+            float2 gz_i = {(float)gz[i].x, (float)gz[i].y};
+            if (z_i.x <= 0.0) gz_i.x = 0.0;
+            if (z_i.y <= 0.0) gz_i.y = 0.0;
+            int cur_c = i % _c;
+            if (pre_c != cur_c) {
+                if (pre_c >= 0) {
+                    atomicAdd(&sm_g_bias[pre_c].x,  my_g_bias.x);
+                    atomicAdd(&sm_g_bias[pre_c].y,  my_g_bias.y);
+                    atomicAdd(&sm_g_scale[pre_c].x, my_g_scale.x);
+                    atomicAdd(&sm_g_scale[pre_c].y, my_g_scale.y);
+                }
+                pre_c = cur_c;
+                scale_c.x = (float)scale[cur_c].x;
+                scale_c.y = (float)scale[cur_c].y;
+                my_g_bias.x  = gz_i.x;
+                my_g_bias.y  = gz_i.y;
+                my_g_scale.x = gz_i.x * x_i.x;
+                my_g_scale.y = gz_i.y * x_i.y;
+            }
+            else {
+                my_g_bias.x  += gz_i.x;
+                my_g_bias.y  += gz_i.y;
+                my_g_scale.x += gz_i.x * x_i.x;
+                my_g_scale.y += gz_i.y * x_i.y;
+            }
+            half2 gx_i;
+            gx_i.x = (half)(gz_i.x * scale_c.x);
+            gx_i.y = (half)(gz_i.y * scale_c.y);
+            gx[i] = gx_i;
+            half2 gy_i;
+            gy_i.x = (half)gz_i.x;
+            gy_i.y = (half)gz_i.y;
+            gy[i] = gy_i;
+        }
+        if (pre_c >= 0) {
+            atomicAdd(&sm_g_bias[pre_c].x,  my_g_bias.x);
+            atomicAdd(&sm_g_bias[pre_c].y,  my_g_bias.y);
+            atomicAdd(&sm_g_scale[pre_c].x, my_g_scale.x);
+            atomicAdd(&sm_g_scale[pre_c].y, my_g_scale.y);
+        }
+
+        __syncthreads();
+        for (int i = threadIdx.x; i < _c; i += blockDim.x) {
+            half2 g_bias_i;
+            g_bias_i.x = (half)sm_g_bias[i].x;
+            g_bias_i.y = (half)sm_g_bias[i].y;
+            atomicAdd(&g_bias[i], g_bias_i);
+            half2 g_scale_i;
+            g_scale_i.x = (half)sm_g_scale[i].x;
+            g_scale_i.y = (half)sm_g_scale[i].y;
+            atomicAdd(&g_scale[i], g_scale_i);
+        }
+    }
+    ''', 'cupy_resnet_bw_SBAR_gX_gScale')
+    
     def bw_scale_bias_relu_conv_bnorm(self, lid,
                                       x, i_scale, i_bias, W,
                                       y, o_scale, o_bias,
@@ -387,11 +536,21 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
         g_beta = go_bias.astype(g_gamma.dtype)
 
         # adjust gy
-        _y = (y - self.saved_mean[lid]) * self.saved_invstd[lid]
-        gy_dtype = gy.dtype
-        gy = gy * o_scale  # test(A)
-        gy = gy - (g_beta + g_gamma * _y) / (n * y_h * y_w)
-        gy = gy.astype(gy_dtype)
+        if self.reference:
+            _y = (y - self.saved_mean[lid]) * self.saved_invstd[lid]
+            gy_dtype = gy.dtype
+            gy = gy - (g_beta + g_gamma * _y) / (n * y_h * y_w)
+            gy = gy.astype(gy_dtype)
+        else:
+            _n, _h, _w, _c = y.shape
+            block_size = 256
+            n_blocks = _get_num_SM() * 4
+            self._bw_scale_bias_relu_conv_bnorm_gY()(
+                (n_blocks,), (block_size,),
+                (y, g_gamma, g_beta,
+                 self.saved_mean[lid], self.saved_invstd[lid],
+                 gy,
+                 _n, _h, _w, _c // 2))
         
         # compute gW
         ops = libcudnn.CUDNN_FUSED_SCALE_BIAS_ACTIVATION_WGRAD
@@ -456,13 +615,151 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
             gi_bias = None
             gi_scale = None
         else:
-            _x = x * i_scale + i_bias
-            gx[_x <= 0] = 0
-            gi_bias = cupy.sum(gx, axis=(0, 1, 2)).reshape((x_c,))
-            gi_scale = cupy.sum(gx * x, axis=(0, 1, 2)).reshape((x_c,))
-            # gx = gx * i_scale  # test(A)
-        
+            if self.reference:
+                _x = x * i_scale + i_bias
+                gx[_x <= 0] = 0
+                gi_bias = cupy.sum(gx, axis=(0, 1, 2)).reshape((x_c,))
+                gi_scale = cupy.sum(gx * x, axis=(0, 1, 2)).reshape((x_c,))
+                gx = gx * i_scale
+            else:
+                _n, _h, _w, _c = x.shape
+                gi_scale = cupy.zeros_like(i_scale)
+                gi_bias = cupy.zeros_like(i_bias)
+                block_size = 1024
+                n_blocks = _get_num_SM()
+                assert _c <= 2048
+                self._bw_scale_bias_relu_conv_bnorm_gX_gScale_gBias()(
+                    (n_blocks,), (block_size,),
+                    (x, i_scale, i_bias,
+                     gx, gi_scale, gi_bias,
+                     _n, _h, _w, _c // 2))
+
         return gx, gi_scale, gi_bias, gW, g_gamma, g_beta
+
+    def _bw_scale_bias_relu_conv_bnorm_gY(self):
+        return cupy.RawKernel(r'''
+#include <cuda_fp16.h>
+    extern "C" __global__
+    void cupy_resnet_bw_SBRCB_gY(
+        const half2 *y, const float2 *g_gamma, const float2 *g_beta,
+        const float2 *mean, const float2 *invstd,
+        half2 *gy,
+        int _n, int _h, int _w, int _c)
+    {
+        int tid = threadIdx.x + blockDim.x * blockIdx.x;
+        int num_threads = blockDim.x * gridDim.x;
+        int num_elements = _n * _h * _w * _c;
+        float2 mean_c;
+        float2 invstd_c;
+        float2 g_beta_c;
+        float2 g_gamma_c;
+        int pre_c = -1;
+        for (int i = tid; i < num_elements; i += num_threads) {
+            int c = i % _c;
+            if (pre_c != c) {
+                mean_c = mean[c];
+                invstd_c = invstd[c];
+                g_beta_c = g_beta[c];
+                g_gamma_c = g_gamma[c];
+            }
+            pre_c = c;
+            half2 y_i = y[i];
+            half2 gy_i = gy[i];
+            float2 _y;
+            _y.x = ((float)y_i.x - mean_c.x) * invstd_c.x;
+            _y.y = ((float)y_i.y - mean_c.y) * invstd_c.y;
+            float2 _gy;
+            _gy.x = (float)gy_i.x;
+            _gy.y = (float)gy_i.y;
+            _gy.x -= (g_beta_c.x + g_gamma_c.x * _y.x) / (_n * _h * _w);
+            _gy.y -= (g_beta_c.y + g_gamma_c.y * _y.y) / (_n * _h * _w);
+            gy_i.x = (half)_gy.x;
+            gy_i.y = (half)_gy.y;
+            gy[i] = gy_i;
+        }
+    }
+        ''', 'cupy_resnet_bw_SBRCB_gY')
+
+    def _bw_scale_bias_relu_conv_bnorm_gX_gScale_gBias(self):
+        return cupy.RawKernel(r'''
+#include <cuda_fp16.h>
+    extern "C" __global__
+    void cupy_resnet_bw_SBRCB_gX_gScale(
+        const half2 *x, const half2 *scale, const half2 *bias,
+        half2 *gx, half2 *g_scale, half2 *g_bias,
+        int _n, int _h, int _w, int _c)
+    {
+        __shared__ float2 sm_g_bias[1024];
+        __shared__ float2 sm_g_scale[1024];
+        for (int i = threadIdx.x; i < _c; i += blockDim.x) {
+            sm_g_bias[i].x = 0.0;
+            sm_g_bias[i].y = 0.0;
+            sm_g_scale[i].x = 0.0;
+            sm_g_scale[i].y = 0.0;
+        }
+        __syncthreads();
+
+        int tid = threadIdx.x + blockDim.x * blockIdx.x;
+        int num_threads = blockDim.x * gridDim.x;
+        int num_elements = _n * _h * _w * _c;
+        int pre_c = -1;
+        float2  my_g_bias;
+        float2  my_g_scale;
+        half2  my_scale;
+        half2  my_bias;
+        for (int i = tid; i < num_elements; i += num_threads) {
+            int cur_c = i % _c;
+            if (pre_c != cur_c) {
+                if (pre_c >= 0) {
+                    atomicAdd(&sm_g_bias[pre_c].x,  my_g_bias.x);
+                    atomicAdd(&sm_g_bias[pre_c].y,  my_g_bias.y);
+                    atomicAdd(&sm_g_scale[pre_c].x, my_g_scale.x);
+                    atomicAdd(&sm_g_scale[pre_c].y, my_g_scale.y);
+                }
+                my_g_bias.x  = 0.0;
+                my_g_bias.y  = 0.0;
+                my_g_scale.x = 0.0;
+                my_g_scale.y = 0.0;
+                my_scale = scale[cur_c];
+                my_bias  = bias[cur_c];
+            }
+            pre_c = cur_c;
+            half2 x_i = x[i];
+            half2 gx_i = gx[i];
+            float2 _x;
+            _x.x = (float)my_scale.x * (float)x_i.x + (float)my_bias.x;
+            _x.y = (float)my_scale.y * (float)x_i.y + (float)my_bias.y;
+            float2 _gx = {(float)gx_i.x, (float)gx_i.y};
+            if (_x.x <= 0.0) _gx.x = 0.0;
+            if (_x.y <= 0.0) _gx.y = 0.0;
+            my_g_bias.x  += _gx.x;
+            my_g_bias.y  += _gx.y;
+            my_g_scale.x += _gx.x * _x.x;
+            my_g_scale.y += _gx.y * _x.y;
+            gx_i.x = (half)(_gx.x * (float)my_scale.x);
+            gx_i.y = (half)(_gx.y * (float)my_scale.y);
+            gx[i] = gx_i;
+        }
+        if (pre_c >= 0) {
+            atomicAdd(&sm_g_bias[pre_c].x,  my_g_bias.x);
+            atomicAdd(&sm_g_bias[pre_c].y,  my_g_bias.y);
+            atomicAdd(&sm_g_scale[pre_c].x, my_g_scale.x);
+            atomicAdd(&sm_g_scale[pre_c].y, my_g_scale.y);
+        }
+
+        __syncthreads();
+        for (int i = threadIdx.x; i < _c; i += blockDim.x) {
+            half2 g_scale_i;
+            g_scale_i.x = (half)sm_g_scale[i].x;
+            g_scale_i.y = (half)sm_g_scale[i].y;
+            atomicAdd(&g_scale[i], g_scale_i);
+            half2 g_bias_i;
+            g_bias_i.x = (half)sm_g_bias[i].x;
+            g_bias_i.y = (half)sm_g_bias[i].y;
+            atomicAdd(&g_bias[i], g_bias_i);
+        }
+    }
+    ''', 'cupy_resnet_bw_SBRCB_gX_gScale')
 
 
 def resnet_bottle_neck(x, W_set, gamma_set, beta_set,
