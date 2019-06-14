@@ -4,9 +4,11 @@ import chainer
 from chainer import backend
 from chainer.backends import cuda
 from chainer.backends import intel64
+from chainer import configuration
 from chainer import function_node
 from chainer.functions.pooling import average_pooling_nd
 from chainer.functions.pooling import pooling_2d
+from chainer import utils
 from chainer.utils import conv
 import chainerx
 
@@ -62,10 +64,11 @@ class AveragePooling2D(pooling_2d.Pooling2D):
         self._in_shape = x[0].shape
         self._in_dtype = x[0].dtype
 
-        n, c, h, w = x[0].shape
+        n, c, h, w = utils.nchw_shape(x[0].shape, self.tensor_layout)
         y_h = conv.get_conv_outsize(h, self.kh, self.sy, self.ph)
         y_w = conv.get_conv_outsize(w, self.kw, self.sx, self.pw)
-        y = cuda.cupy.empty((n, c, y_h, y_w), dtype=x[0].dtype)
+        y_shape = utils.my_shape((n, c, y_h, y_w), self.tensor_layout)
+        y = cuda.cupy.empty(y_shape, dtype=x[0].dtype)
         coeff = 1. / (self.kh * self.kw)
         kern = cuda.elementwise(
             'raw T in, int32 h, int32 w,'
@@ -114,6 +117,7 @@ class AveragePooling2DGrad(function_node.FunctionNode):
             self._in_shape = apool2d._in_shape
             self._in_dtype = apool2d._in_dtype
         self.apool2d = apool2d
+        self.tensor_layout = apool2d.tensor_layout
 
     def forward_cpu(self, gy):
         if (intel64.should_use_ideep('>=auto')
@@ -189,7 +193,7 @@ class AveragePooling2DGrad(function_node.FunctionNode):
             False).apply(grad_outputs)
 
 
-def average_pooling_2d(x, ksize, stride=None, pad=0):
+def average_pooling_2d(x, ksize, stride=None, pad=0, tensor_layout=None):
     """Spatial average pooling function.
 
     This function acts similarly to :func:`~chainer.functions.convolution_2d`,
@@ -222,6 +226,9 @@ def average_pooling_2d(x, ksize, stride=None, pad=0):
        ``pad_value=None``.
 
     """
+    if tensor_layout is None:
+        tensor_layout = configuration.config.tensor_layout
     if backend.get_array_module(x) is chainerx:
         return average_pooling_nd.average_pooling_nd(x, ksize, stride, pad)
-    return AveragePooling2D(ksize, stride, pad, False).apply((x,))[0]
+    return AveragePooling2D(ksize, stride, pad, False,
+                            tensor_layout=tensor_layout).apply((x,))[0]

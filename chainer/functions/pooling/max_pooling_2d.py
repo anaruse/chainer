@@ -3,6 +3,7 @@ import numpy
 import chainer
 from chainer.backends import cuda
 from chainer.backends import intel64
+from chainer import configuration
 from chainer import function_node
 from chainer.functions.pooling import pooling_2d
 from chainer.utils import conv
@@ -257,6 +258,7 @@ class MaxPooling2DWithIndexes(function_node.FunctionNode):
             self.indexes = mpool2d.indexes
         else:
             self.mpool2d = mpool2d
+        self.tensor_layout = self.mpool2d.tensor_layout
 
     def forward_cpu(self, x):
         col = conv.im2col_cpu(
@@ -347,7 +349,7 @@ class MaxPooling2DWithIndexes(function_node.FunctionNode):
 
 
 def max_pooling_2d(x, ksize, stride=None, pad=0, cover_all=True,
-                   return_indices=False):
+                   return_indices=False, tensor_layout=None):
     """Spatial max pooling function.
 
     This function acts similarly to :func:`~chainer.functions.convolution_2d`,
@@ -381,7 +383,10 @@ def max_pooling_2d(x, ksize, stride=None, pad=0, cover_all=True,
             same device as the input.
 
     """
-    func = MaxPooling2D(ksize, stride, pad, cover_all, return_indices)
+    if tensor_layout is None:
+        tensor_layout = configuration.config.tensor_layout
+    func = MaxPooling2D(ksize, stride, pad, cover_all, return_indices,
+                        tensor_layout=tensor_layout)
     if return_indices:
         with chainer.using_config('use_cudnn', 'never'):
             out = func.apply((x,))[0]
