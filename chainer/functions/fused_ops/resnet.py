@@ -56,12 +56,12 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
     reference = False
     
     def __init__(self, running_mean_set, running_var_set,
-                 bn_eps=2.5e-5, bn_decay=0.9):
+                 stride=1, bn_eps=2.5e-5, bn_decay=0.9):
         self.bn_eps = bn_eps
         self.bn_decay = bn_decay
         self.running_mean_set = running_mean_set
         self.running_var_set = running_var_set
-        self.stride = (1, 1, 1)
+        self.stride = (1, stride, 1)
         self.pad = (0, 1, 0)
 
     def _get_out_size(self, x, W, stride, pad, dilate=1):
@@ -83,6 +83,10 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
         W0, gamma0, beta0 = inputs[1:4]
         W1, gamma1, beta1 = inputs[4:7]
         W2, gamma2, beta2 = inputs[7:10]
+        if self.len_inputs == 10:
+            x4 = None
+        else:
+            x4 = inputs[10]
         self.retain_inputs((0, 1, 2, 3, 4, 5, 6, 7, 8, 9))
 
         x0 = cuda.cupy.ascontiguousarray(x0)
@@ -95,6 +99,8 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
         beta0 = cuda.cupy.ascontiguousarray(beta0)
         beta1 = cuda.cupy.ascontiguousarray(beta1)
         beta2 = cuda.cupy.ascontiguousarray(beta2)
+        if x4 is not None:
+            x4 = cuda.cupy.ascontiguousarray(x4)
 
         x1, scale1, bias1, mean1, invstd1 = self.fw_scale_bias_relu_conv_bnorm(
             0, x0, W0, gamma0, beta0)
@@ -102,7 +108,10 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
             1, x1, W1, gamma1, beta1, scale1, bias1)
         x3, scale3, bias3, mean3, invstd3 = self.fw_scale_bias_relu_conv_bnorm(
             2, x2, W2, gamma2, beta2, scale2, bias2)
-        y = self.fw_scale_bias_add_relu(x3, scale3, bias3, x0)
+        if x4 is not None:
+            y = self.fw_scale_bias_add_relu(x3, scale3, bias3, x4)
+        else:
+            y = self.fw_scale_bias_add_relu(x3, scale3, bias3, x0)
 
         self.x1 = x1
         self.x2 = x2
@@ -354,7 +363,7 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
         return cupy.RawKernel(r'''
 #include <cuda_fp16.h>
     extern "C" __global__
-    void cupy_resnet_fw_scale_bias_add_relu(
+    void cupy_resnet_fw_SBAR(
         const half2 *x, const half2 *scale, const half2 *bias, const half2 *y,
         half2 *z,
         int _n, int _h, int _w, int _c)
@@ -385,7 +394,7 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
             z[i] = z_i;
         }
     }
-    ''', 'cupy_resnet_fw_scale_bias_add_relu')
+    ''', 'cupy_resnet_fw_SBAR')
     
     def backward(self, indexes, grad_outputs):
         inputs = self.get_retained_inputs()
@@ -409,7 +418,7 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
         y = cuda.cupy.ascontiguousarray(y.data)
         gy = cuda.cupy.ascontiguousarray(gy.data)
 
-        gx3, g_gamma2, g_beta2, _gx0 = self.bw_scale_bias_add_relu(
+        gx3, g_gamma2, g_beta2, gx4 = self.bw_scale_bias_add_relu(
             self.x3, self.scale3, self.bias3, y, gy)
 
         ret = self.bw_scale_bias_relu_conv_bnorm(
@@ -439,7 +448,9 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
         del gx1
         self.x1 = None
 
-        gx0 = gx0 + _gx0
+        if self.len_inputs == 10:
+            gx0 = gx0 + gx4
+            gx4 = None
 
         gx0 = chainer.Variable(gx0)
         gW0 = chainer.Variable(gW0)
@@ -455,6 +466,9 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
                gW0, g_gamma0, g_beta0,
                gW1, g_gamma1, g_beta1,
                gW2, g_gamma2, g_beta2)
+        if gx4 is not None:
+            gx4 = chainer.Variable(gx4)
+            ret = ret + (gx4,)
         return ret
         
     def bw_scale_bias_add_relu(self, x, scale, bias, z, gz):
@@ -490,7 +504,7 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
         return cupy.RawKernel(r'''
 #include <cuda_fp16.h>
     extern "C" __global__
-    void cupy_resnet_bw_SBAR_gX_gScale(
+    void cupy_resnet_bw_SBAR_gX_gGamma(
         const half2 *x, const half2 *scale, const half2 *bias,
         const half2 *z, const half2 *gz, const float2 *invstd,
         half2 *gx, float2 *g_gamma, float2 *g_beta, half2 *gy,
@@ -565,7 +579,7 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
             atomicAdd(&g_gamma[i].y, sm_g_gamma[i].y * invstd[i].y);
         }
     }
-    ''', 'cupy_resnet_bw_SBAR_gX_gScale')
+    ''', 'cupy_resnet_bw_SBAR_gX_gGamma')
     
     def bw_scale_bias_relu_conv_bnorm(self, lid,
                                       x, i_scale, i_bias, W,
@@ -749,7 +763,7 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
         return cupy.RawKernel(r'''
 #include <cuda_fp16.h>
     extern "C" __global__
-    void cupy_resnet_bw_SBRCB_gX_gScale(
+    void cupy_resnet_bw_SBRCB_gX_gGamma(
         const half2 *x, const half2 *scale, const half2 *bias,
         const float2 *invstd,
         half2 *gx, float2 *g_gamma, float2 *g_beta,
@@ -821,17 +835,19 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
             atomicAdd(&g_gamma[i].y, sm_g_gamma[i].y * invstd[i].y);
         }
     }
-    ''', 'cupy_resnet_bw_SBRCB_gX_gScale')
+    ''', 'cupy_resnet_bw_SBRCB_gX_gGamma')
 
 
-def resnet_bottle_neck(x, W_set, gamma_set, beta_set,
+def resnet_bottle_neck(x, h, W_set, gamma_set, beta_set,
                        running_mean_set, running_var_set,
-                       bn_eps=2.5e-5, bn_decay=0.9):
+                       stride=1, bn_eps=2.5e-5, bn_decay=0.9):
     fnode = ResNetBottleNeckFunction(running_mean_set, running_var_set,
-                                     bn_eps, bn_decay)
+                                     stride, bn_eps, bn_decay)
     args = (x,
             W_set[0], gamma_set[0], beta_set[0],
             W_set[1], gamma_set[1], beta_set[1],
             W_set[2], gamma_set[2], beta_set[2])
+    if h is not None:
+        args = args + (h,)
     y, = fnode.apply(args)
     return y

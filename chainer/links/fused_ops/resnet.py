@@ -11,10 +11,11 @@ class ResNetBottleNeck(link.Link):
 
     tensor_layout = 'NHWC'
 
-    def __init__(self, ch, bn_decay=0.9, bn_eps=2e-5):
+    def __init__(self, ch, stride=1, bn_decay=0.9, bn_eps=2e-5):
         super(ResNetBottleNeck, self).__init__()
 
         self.ch = ch
+        self.stride = stride
         self.bn_decay = bn_decay
         self.bn_eps = bn_eps
 
@@ -65,12 +66,12 @@ class ResNetBottleNeck(link.Link):
         return initializers.generate_array(
             initializer, size, self.xp, dtype=dtype, device=self.device)
 
-    def forward(self, x, **kwargs):
+    def forward(self, x, h=None, **kwargs):
         ret = resnet.resnet_bottle_neck(
-            x, (self.W1, self.W2, self.W3),
+            x, h, (self.W1, self.W2, self.W3),
             (self.gamma1, self.gamma2, self.gamma3),
             (self.beta1, self.beta2, self.beta3),
             (self.running_mean1, self.running_mean2, self.running_mean3),
             (self.running_var1, self.running_var2, self.running_var3),
-            self.bn_eps, self.bn_decay)
+            self.stride, self.bn_eps, self.bn_decay)
         return ret
