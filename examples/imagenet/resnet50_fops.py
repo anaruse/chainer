@@ -7,9 +7,6 @@ import chainer.functions as F
 from chainer import initializers
 import chainer.links as L
 
-_bn_eps = 2.5e-5
-# _bn_eps = 1e-4
-
 
 class BottleNeckA(chainer.Chain):
 
@@ -23,7 +20,7 @@ class BottleNeckA(chainer.Chain):
                 initialW=initialW, nobias=True)
             self.bn4 = L.BatchNormalization(out_size)
             self.resnet_bottle_neck = L.ResNetBottleNeck(
-                ch=(in_size, ch, out_size), stride=stride, bn_eps=_bn_eps)
+                ch=(in_size, ch, out_size), stride=stride)
 
     def forward(self, x):
         h = self.bn4(self.conv4(x))
@@ -40,7 +37,7 @@ class BottleNeckB(chainer.Chain):
                 ch=(in_size, ch, in_size))
 
     def forward(self, x):
-        y = self.resnet_bottle_neck(x, bn_eps=_bn_eps)
+        y = self.resnet_bottle_neck(x)
         return y
 
 
