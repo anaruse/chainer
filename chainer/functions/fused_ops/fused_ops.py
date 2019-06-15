@@ -29,6 +29,7 @@ def _pair(x):
 
 
 _num_SM = [None] * 16
+_plans = {}
 
 
 def _get_num_SM(device_id=None):
@@ -90,87 +91,88 @@ class FusedScaleBiasActConvBnFunction(function_node.FunctionNode):
         gamma = cuda.cupy.ascontiguousarray(gamma)
         beta = cuda.cupy.ascontiguousarray(beta)
 
-        x_desc = cudnn.create_tensor_descriptor(
-            x, libcudnn.CUDNN_TENSOR_NHWC)
-        w_desc = cudnn.create_filter_descriptor(
-            W, libcudnn.CUDNN_TENSOR_NHWC)
-        gamma_desc = cudnn.create_tensor_descriptor(
-            gamma.reshape(1, 1, 1, out_c), libcudnn.CUDNN_TENSOR_NHWC)
         y = cuda.cupy.empty((n, out_h, out_w, out_c), dtype=x.dtype)
-        y_desc = cudnn.create_tensor_descriptor(
-            y, libcudnn.CUDNN_TENSOR_NHWC)
         ysum = cuda.cupy.empty((1, 1, 1, out_c), dtype=numpy.float32)
         ysqsum = cuda.cupy.empty_like(ysum)
         self.saved_mean = cuda.cupy.empty_like(ysum)
         self.saved_invstd = cuda.cupy.empty_like(ysum)
-        ysum_desc = cudnn.create_tensor_descriptor(
-            ysum, libcudnn.CUDNN_TENSOR_NHWC)
         out_scale = cuda.cupy.empty((1, 1, 1, out_c), dtype=numpy.float16)
         out_bias = cuda.cupy.empty_like(out_scale)
-        out_scale_desc = cudnn.create_tensor_descriptor(
-            out_scale, libcudnn.CUDNN_TENSOR_NHWC)
 
-        conv_desc = cudnn.create_convolution_descriptor(
-            (self.ph, self.pw), (self.sy, self.sx), W.dtype,
-            use_tensor_core=True)
         # bn_mode = libcudnn.CUDNN_BATCHNORM_SPATIAL_PERSISTENT
         bn_mode = libcudnn.CUDNN_BATCHNORM_SPATIAL
         ptr_ph = libcudnn.CUDNN_PTR_16B_ALIGNED
 
         #
         ops = libcudnn.CUDNN_FUSED_SCALE_BIAS_ACTIVATION_CONV_BNSTATS
-        const_param = [
-            (libcudnn.CUDNN_PARAM_XDESC, x_desc),
-            (libcudnn.CUDNN_PARAM_XDATA_PLACEHOLDER, ptr_ph),
-            (libcudnn.CUDNN_PARAM_BN_MODE, bn_mode),
-            (libcudnn.CUDNN_PARAM_CONV_DESC, conv_desc),
-            (libcudnn.CUDNN_PARAM_WDESC, w_desc),
-            (libcudnn.CUDNN_PARAM_WDATA_PLACEHOLDER, ptr_ph),
-            (libcudnn.CUDNN_PARAM_YDESC, y_desc),
-            (libcudnn.CUDNN_PARAM_YDATA_PLACEHOLDER, ptr_ph),
-            (libcudnn.CUDNN_PARAM_YSTATS_DESC, ysum_desc),
-            (libcudnn.CUDNN_PARAM_YSUM_PLACEHOLDER, ptr_ph),
-            (libcudnn.CUDNN_PARAM_YSQSUM_PLACEHOLDER, ptr_ph),
-        ]
+        key = (ops, bn_mode, x.shape, x.dtype, W.shape, W.dtype,
+               y.shape, y.dtype, scale is None)
+        if key in _plans:
+            plan, workspace_size = _plans[key]
+        else:
+            x_desc = cudnn.create_tensor_descriptor(
+                x, libcudnn.CUDNN_TENSOR_NHWC)
+            w_desc = cudnn.create_filter_descriptor(
+                W, libcudnn.CUDNN_TENSOR_NHWC)
+            y_desc = cudnn.create_tensor_descriptor(
+                y, libcudnn.CUDNN_TENSOR_NHWC)
+            ysum_desc = cudnn.create_tensor_descriptor(
+                ysum, libcudnn.CUDNN_TENSOR_NHWC)
+            conv_desc = cudnn.create_convolution_descriptor(
+                (self.ph, self.pw), (self.sy, self.sx), W.dtype,
+                use_tensor_core=True)
+            const_param = [
+                (libcudnn.CUDNN_PARAM_XDESC, x_desc),
+                (libcudnn.CUDNN_PARAM_XDATA_PLACEHOLDER, ptr_ph),
+                (libcudnn.CUDNN_PARAM_BN_MODE, bn_mode),
+                (libcudnn.CUDNN_PARAM_CONV_DESC, conv_desc),
+                (libcudnn.CUDNN_PARAM_WDESC, w_desc),
+                (libcudnn.CUDNN_PARAM_WDATA_PLACEHOLDER, ptr_ph),
+                (libcudnn.CUDNN_PARAM_YDESC, y_desc),
+                (libcudnn.CUDNN_PARAM_YDATA_PLACEHOLDER, ptr_ph),
+                (libcudnn.CUDNN_PARAM_YSTATS_DESC, ysum_desc),
+                (libcudnn.CUDNN_PARAM_YSUM_PLACEHOLDER, ptr_ph),
+                (libcudnn.CUDNN_PARAM_YSQSUM_PLACEHOLDER, ptr_ph),
+            ]
+            if scale is not None:
+                scale_desc = cudnn.create_tensor_descriptor(
+                    scale.reshape(1, 1, 1, in_c), libcudnn.CUDNN_TENSOR_NHWC)
+                act_desc = cudnn.create_activation_descriptor(
+                    libcudnn.CUDNN_ACTIVATION_RELU)
+                const_param.extend([
+                    (libcudnn.CUDNN_PARAM_BN_EQSCALEBIAS_DESC, scale_desc),
+                    (libcudnn.CUDNN_PARAM_BN_EQSCALE_PLACEHOLDER, ptr_ph),
+                    (libcudnn.CUDNN_PARAM_BN_EQBIAS_PLACEHOLDER, ptr_ph),
+                    (libcudnn.CUDNN_PARAM_ACTIVATION_DESC, act_desc),
+                ])
+            plan = cudnn.create_fused_ops_plan(ops)
+            const_pack = cudnn.create_fused_ops_const_param_pack(
+                ops, const_param)
+            workspace_size = cudnn.make_fused_ops_plan(plan, const_pack)
+            max_workspace_size = cudnn.get_max_workspace_size()
+            if workspace_size > max_workspace_size:
+                msg = ('required workspace size ({}) is larger than max workspace'
+                       ' size ({})'.format(workspace_size, max_workspace_size))
+                raise RuntimeError(msg)
+            _plans[key] = (plan, workspace_size)
+        workspace = memory.alloc(workspace_size)
         var_param = [
             (libcudnn.CUDNN_PTR_XDATA, x),
             (libcudnn.CUDNN_PTR_WDATA, W),
             (libcudnn.CUDNN_PTR_YDATA, y),
             (libcudnn.CUDNN_PTR_YSUM, ysum),
             (libcudnn.CUDNN_PTR_YSQSUM, ysqsum),
+            (libcudnn.CUDNN_PTR_WORKSPACE, workspace),
+            (libcudnn.CUDNN_SCALAR_SIZE_T_WORKSPACE_SIZE_IN_BYTES,
+             workspace_size),
         ]
         if scale is not None:
             scale = cuda.cupy.ascontiguousarray(scale)
             bias = cuda.cupy.ascontiguousarray(bias)
-            scale_desc = cudnn.create_tensor_descriptor(
-                scale.reshape(1, 1, 1, in_c), libcudnn.CUDNN_TENSOR_NHWC)
-            act_desc = cudnn.create_activation_descriptor(
-                libcudnn.CUDNN_ACTIVATION_RELU)
-            const_param.extend([
-                (libcudnn.CUDNN_PARAM_BN_EQSCALEBIAS_DESC, scale_desc),
-                (libcudnn.CUDNN_PARAM_BN_EQSCALE_PLACEHOLDER, ptr_ph),
-                (libcudnn.CUDNN_PARAM_BN_EQBIAS_PLACEHOLDER, ptr_ph),
-                (libcudnn.CUDNN_PARAM_ACTIVATION_DESC, act_desc),
-            ])
             var_param.extend([
                 (libcudnn.CUDNN_PTR_BN_EQSCALE, scale),
                 (libcudnn.CUDNN_PTR_BN_EQBIAS, bias),
             ])
-        plan = cudnn.create_fused_ops_plan(ops)
-        const_pack = cudnn.create_fused_ops_const_param_pack(
-            ops, const_param)
-        workspace_size = cudnn.make_fused_ops_plan(plan, const_pack)
-        max_workspace_size = cudnn.get_max_workspace_size()
-        if workspace_size > max_workspace_size:
-            msg = ('required workspace size ({}) is larger than max workspace'
-                   ' size ({})'.format(workspace_size, max_workspace_size))
-            raise RuntimeError(msg)
-        workspace = memory.alloc(workspace_size)
-        var_param.extend([
-            (libcudnn.CUDNN_PTR_WORKSPACE, workspace),
-            (libcudnn.CUDNN_SCALAR_SIZE_T_WORKSPACE_SIZE_IN_BYTES,
-             workspace_size),
-        ])
         var_pack = cudnn.create_fused_ops_variant_param_pack(
             ops, var_param)
         cudnn.fused_ops_execute(plan, var_pack)
@@ -178,22 +180,43 @@ class FusedScaleBiasActConvBnFunction(function_node.FunctionNode):
 
         #
         ops = libcudnn.CUDNN_FUSED_BN_FINALIZE_STATISTICS_TRAINING
-        const_param = [
-            (libcudnn.CUDNN_PARAM_BN_MODE, bn_mode),
-            (libcudnn.CUDNN_PARAM_YSTATS_DESC, ysum_desc),
-            (libcudnn.CUDNN_PARAM_YSUM_PLACEHOLDER, ptr_ph),
-            (libcudnn.CUDNN_PARAM_YSQSUM_PLACEHOLDER, ptr_ph),
-            (libcudnn.CUDNN_PARAM_BN_SCALEBIAS_MEANVAR_DESC, gamma_desc),
-            (libcudnn.CUDNN_PARAM_BN_SCALE_PLACEHOLDER, ptr_ph),
-            (libcudnn.CUDNN_PARAM_BN_BIAS_PLACEHOLDER, ptr_ph),
-            (libcudnn.CUDNN_PARAM_BN_SAVED_MEAN_PLACEHOLDER, ptr_ph),
-            (libcudnn.CUDNN_PARAM_BN_SAVED_INVSTD_PLACEHOLDER, ptr_ph),
-            (libcudnn.CUDNN_PARAM_BN_RUNNING_MEAN_PLACEHOLDER, ptr_ph),
-            (libcudnn.CUDNN_PARAM_BN_RUNNING_VAR_PLACEHOLDER, ptr_ph),
-            (libcudnn.CUDNN_PARAM_BN_EQSCALEBIAS_DESC, out_scale_desc),
-            (libcudnn.CUDNN_PARAM_BN_EQSCALE_PLACEHOLDER, ptr_ph),
-            (libcudnn.CUDNN_PARAM_BN_EQBIAS_PLACEHOLDER, ptr_ph),
-        ]
+        key = (ops, bn_mode, ysum.shape, ysum.dtype, gamma.shape, gamma.dtype)
+        if key in _plans:
+            plan, workspace_size = _plans[key]
+        else:
+            gamma_desc = cudnn.create_tensor_descriptor(
+                gamma.reshape(1, 1, 1, out_c), libcudnn.CUDNN_TENSOR_NHWC)
+            out_scale_desc = cudnn.create_tensor_descriptor(
+                out_scale, libcudnn.CUDNN_TENSOR_NHWC)
+            ysum_desc = cudnn.create_tensor_descriptor(
+                ysum, libcudnn.CUDNN_TENSOR_NHWC)
+            const_param = [
+                (libcudnn.CUDNN_PARAM_BN_MODE, bn_mode),
+                (libcudnn.CUDNN_PARAM_YSTATS_DESC, ysum_desc),
+                (libcudnn.CUDNN_PARAM_YSUM_PLACEHOLDER, ptr_ph),
+                (libcudnn.CUDNN_PARAM_YSQSUM_PLACEHOLDER, ptr_ph),
+                (libcudnn.CUDNN_PARAM_BN_SCALEBIAS_MEANVAR_DESC, gamma_desc),
+                (libcudnn.CUDNN_PARAM_BN_SCALE_PLACEHOLDER, ptr_ph),
+                (libcudnn.CUDNN_PARAM_BN_BIAS_PLACEHOLDER, ptr_ph),
+                (libcudnn.CUDNN_PARAM_BN_SAVED_MEAN_PLACEHOLDER, ptr_ph),
+                (libcudnn.CUDNN_PARAM_BN_SAVED_INVSTD_PLACEHOLDER, ptr_ph),
+                (libcudnn.CUDNN_PARAM_BN_RUNNING_MEAN_PLACEHOLDER, ptr_ph),
+                (libcudnn.CUDNN_PARAM_BN_RUNNING_VAR_PLACEHOLDER, ptr_ph),
+                (libcudnn.CUDNN_PARAM_BN_EQSCALEBIAS_DESC, out_scale_desc),
+                (libcudnn.CUDNN_PARAM_BN_EQSCALE_PLACEHOLDER, ptr_ph),
+                (libcudnn.CUDNN_PARAM_BN_EQBIAS_PLACEHOLDER, ptr_ph),
+            ]
+            plan = cudnn.create_fused_ops_plan(ops)
+            const_pack = cudnn.create_fused_ops_const_param_pack(
+                ops, const_param)
+            workspace_size = cudnn.make_fused_ops_plan(plan, const_pack)
+            max_workspace_size = cudnn.get_max_workspace_size()
+            if workspace_size > max_workspace_size:
+                msg = ('required workspace size ({}) is larger than max workspace'
+                       ' size ({})'.format(workspace_size, max_workspace_size))
+                raise RuntimeError(msg)
+            _plans[key] = (plan, workspace_size)
+        workspace = memory.alloc(workspace_size)
         acc_count = n * in_h * in_w
         factor = 1 - self.bn_decay
         var_param = [
@@ -210,22 +233,10 @@ class FusedScaleBiasActConvBnFunction(function_node.FunctionNode):
             (libcudnn.CUDNN_SCALAR_INT64_T_BN_ACCUMULATION_COUNT, acc_count),
             (libcudnn.CUDNN_SCALAR_DOUBLE_BN_EXP_AVG_FACTOR, factor),
             (libcudnn.CUDNN_SCALAR_DOUBLE_BN_EPSILON, self.bn_eps),
-        ]
-        plan = cudnn.create_fused_ops_plan(ops)
-        const_pack = cudnn.create_fused_ops_const_param_pack(
-            ops, const_param)
-        workspace_size = cudnn.make_fused_ops_plan(plan, const_pack)
-        max_workspace_size = cudnn.get_max_workspace_size()
-        if workspace_size > max_workspace_size:
-            msg = ('required workspace size ({}) is larger than max workspace'
-                   ' size ({})'.format(workspace_size, max_workspace_size))
-            raise RuntimeError(msg)
-        workspace = memory.alloc(workspace_size)
-        var_param.extend([
             (libcudnn.CUDNN_PTR_WORKSPACE, workspace),
             (libcudnn.CUDNN_SCALAR_SIZE_T_WORKSPACE_SIZE_IN_BYTES,
              workspace_size)
-        ])
+        ]
         var_pack = cudnn.create_fused_ops_variant_param_pack(
             ops, var_param)
         cudnn.fused_ops_execute(plan, var_pack)
@@ -260,19 +271,12 @@ class FusedScaleBiasActConvBnFunction(function_node.FunctionNode):
         gy = cuda.cupy.ascontiguousarray(gy.data)
         g_out_scale = cuda.cupy.ascontiguousarray(g_out_scale.data)
         g_out_bias = cuda.cupy.ascontiguousarray(g_out_bias.data)
+        if scale is not None:
+            scale = cuda.cupy.ascontiguousarray(scale.data)
+            bias = cuda.cupy.ascontiguousarray(bias.data)
 
         gW = cuda.cupy.empty_like(W)
 
-        x_desc = cudnn.create_tensor_descriptor(
-            x, libcudnn.CUDNN_TENSOR_NHWC)
-        w_desc = cudnn.create_filter_descriptor(
-            W, libcudnn.CUDNN_TENSOR_NHWC)
-        y_desc = cudnn.create_tensor_descriptor(
-            gy, libcudnn.CUDNN_TENSOR_NHWC)
-
-        conv_desc = cudnn.create_convolution_descriptor(
-            (self.ph, self.pw), (self.sy, self.sx), W.dtype,
-            use_tensor_core=True)
         # bn_mode = libcudnn.CUDNN_BATCHNORM_SPATIAL_PERSISTENT
         bn_mode = libcudnn.CUDNN_BATCHNORM_SPATIAL
         ptr_ph = libcudnn.CUDNN_PTR_16B_ALIGNED
@@ -283,53 +287,65 @@ class FusedScaleBiasActConvBnFunction(function_node.FunctionNode):
 
         # **** gW ****
         ops = libcudnn.CUDNN_FUSED_SCALE_BIAS_ACTIVATION_WGRAD
-        const_param = [
-            (libcudnn.CUDNN_PARAM_XDESC, x_desc),
-            (libcudnn.CUDNN_PARAM_XDATA_PLACEHOLDER, ptr_ph),
-            (libcudnn.CUDNN_PARAM_BN_MODE, bn_mode),
-            (libcudnn.CUDNN_PARAM_CONV_DESC, conv_desc),
-            (libcudnn.CUDNN_PARAM_DWDESC, w_desc),
-            (libcudnn.CUDNN_PARAM_DWDATA_PLACEHOLDER, ptr_ph),
-            (libcudnn.CUDNN_PARAM_DYDESC, y_desc),
-            (libcudnn.CUDNN_PARAM_DYDATA_PLACEHOLDER, ptr_ph),
-        ]
+        key = (ops, bn_mode, x.shape, x.dtype, W.shape, W.dtype,
+               y.shape, y.dtype, scale is None)
+        if key in _plans:
+            plan, workspace_size = _plans[key]
+        else:
+            x_desc = cudnn.create_tensor_descriptor(
+                x, libcudnn.CUDNN_TENSOR_NHWC)
+            w_desc = cudnn.create_filter_descriptor(
+                W, libcudnn.CUDNN_TENSOR_NHWC)
+            y_desc = cudnn.create_tensor_descriptor(
+                gy, libcudnn.CUDNN_TENSOR_NHWC)
+            conv_desc = cudnn.create_convolution_descriptor(
+                (self.ph, self.pw), (self.sy, self.sx), W.dtype,
+                use_tensor_core=True)
+            const_param = [
+                (libcudnn.CUDNN_PARAM_XDESC, x_desc),
+                (libcudnn.CUDNN_PARAM_XDATA_PLACEHOLDER, ptr_ph),
+                (libcudnn.CUDNN_PARAM_BN_MODE, bn_mode),
+                (libcudnn.CUDNN_PARAM_CONV_DESC, conv_desc),
+                (libcudnn.CUDNN_PARAM_DWDESC, w_desc),
+                (libcudnn.CUDNN_PARAM_DWDATA_PLACEHOLDER, ptr_ph),
+                (libcudnn.CUDNN_PARAM_DYDESC, y_desc),
+                (libcudnn.CUDNN_PARAM_DYDATA_PLACEHOLDER, ptr_ph),
+            ]
+            if scale is not None:
+                scale_desc = cudnn.create_tensor_descriptor(
+                    scale.reshape(1, 1, 1, in_c), libcudnn.CUDNN_TENSOR_NHWC)
+                act_desc = cudnn.create_activation_descriptor(
+                    libcudnn.CUDNN_ACTIVATION_RELU)
+                const_param.extend([
+                    (libcudnn.CUDNN_PARAM_BN_EQSCALEBIAS_DESC, scale_desc),
+                    (libcudnn.CUDNN_PARAM_BN_EQSCALE_PLACEHOLDER, ptr_ph),
+                    (libcudnn.CUDNN_PARAM_BN_EQBIAS_PLACEHOLDER, ptr_ph),
+                    (libcudnn.CUDNN_PARAM_ACTIVATION_DESC, act_desc),
+                ])
+            plan = cudnn.create_fused_ops_plan(ops)
+            const_pack = cudnn.create_fused_ops_const_param_pack(
+                ops, const_param)
+            workspace_size = cudnn.make_fused_ops_plan(plan, const_pack)
+            max_workspace_size = cudnn.get_max_workspace_size()
+            if workspace_size > max_workspace_size:
+                msg = ('required workspace size ({}) is larger than max workspace'
+                       ' size ({})'.format(workspace_size, max_workspace_size))
+                raise RuntimeError(msg)
+            _plans[key] = (plan, workspace_size)
+        workspace = memory.alloc(workspace_size)
         var_param = [
             (libcudnn.CUDNN_PTR_XDATA, x),
             (libcudnn.CUDNN_PTR_DWDATA, gW),
             (libcudnn.CUDNN_PTR_DYDATA, gy),
+            (libcudnn.CUDNN_PTR_WORKSPACE, workspace),
+            (libcudnn.CUDNN_SCALAR_SIZE_T_WORKSPACE_SIZE_IN_BYTES,
+             workspace_size),
         ]
         if scale is not None:
-            scale = cuda.cupy.ascontiguousarray(scale.data)
-            bias = cuda.cupy.ascontiguousarray(bias.data)
-            scale_desc = cudnn.create_tensor_descriptor(
-                scale.reshape(1, 1, 1, in_c), libcudnn.CUDNN_TENSOR_NHWC)
-            act_desc = cudnn.create_activation_descriptor(
-                libcudnn.CUDNN_ACTIVATION_RELU)
-            const_param.extend([
-                (libcudnn.CUDNN_PARAM_BN_EQSCALEBIAS_DESC, scale_desc),
-                (libcudnn.CUDNN_PARAM_BN_EQSCALE_PLACEHOLDER, ptr_ph),
-                (libcudnn.CUDNN_PARAM_BN_EQBIAS_PLACEHOLDER, ptr_ph),
-                (libcudnn.CUDNN_PARAM_ACTIVATION_DESC, act_desc),
-            ])
             var_param.extend([
                 (libcudnn.CUDNN_PTR_BN_EQSCALE, scale),
                 (libcudnn.CUDNN_PTR_BN_EQBIAS, bias),
             ])
-        plan = cudnn.create_fused_ops_plan(ops)
-        const_pack = cudnn.create_fused_ops_const_param_pack(
-            ops, const_param)
-        workspace_size = cudnn.make_fused_ops_plan(plan, const_pack)
-        max_workspace_size = cudnn.get_max_workspace_size()
-        if workspace_size > max_workspace_size:
-            msg = ('required workspace size ({}) is larger than max workspace'
-                   ' size ({})'.format(workspace_size, max_workspace_size))
-            raise RuntimeError(msg)
-        workspace = memory.alloc(workspace_size)
-        var_param.extend([
-            (libcudnn.CUDNN_PTR_WORKSPACE, workspace),
-            (libcudnn.CUDNN_SCALAR_SIZE_T_WORKSPACE_SIZE_IN_BYTES,
-             workspace_size),
-        ])
         var_pack = cudnn.create_fused_ops_variant_param_pack(
             ops, var_param)
         cudnn.fused_ops_execute(plan, var_pack)
