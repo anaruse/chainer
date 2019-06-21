@@ -87,7 +87,8 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
             x4 = None
         else:
             x4 = inputs[10]
-        self.retain_inputs((0, 1, 2, 3, 4, 5, 6, 7, 8, 9))
+        if configuration.config.train:
+            self.retain_inputs((0, 1, 2, 3, 4, 5, 6, 7, 8, 9))
 
         x0 = cuda.cupy.ascontiguousarray(x0)
         W0 = cuda.cupy.ascontiguousarray(W0)
@@ -113,19 +114,27 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
         else:
             y = self.fw_scale_bias_add_relu(x3, scale3, bias3, x0)
 
-        self.x1 = x1
-        self.x2 = x2
-        self.x3 = x3
-        self.scale1 = scale1
-        self.scale2 = scale2
-        self.scale3 = scale3
-        self.bias1 = bias1
-        self.bias2 = bias2
-        self.bias3 = bias3
-        self.saved_mean = (mean1, mean2, mean3)
-        self.saved_invstd = (invstd1, invstd2, invstd3)
-        
-        self.retain_outputs((0,))
+        if configuration.config.train:
+            self.x1 = x1
+            self.x2 = x2
+            self.x3 = x3
+            self.scale1 = scale1
+            self.scale2 = scale2
+            self.scale3 = scale3
+            self.bias1 = bias1
+            self.bias2 = bias2
+            self.bias3 = bias3
+            self.saved_mean = (mean1, mean2, mean3)
+            self.saved_invstd = (invstd1, invstd2, invstd3)
+            self.retain_outputs((0,))
+            if False:  # debug
+                _maxabs1 = cupy.max(cupy.abs(invstd1))
+                _maxabs2 = cupy.max(cupy.abs(invstd2))
+                _maxabs3 = cupy.max(cupy.abs(invstd3))
+                if max(_maxabs1, _maxabs2, _maxabs3) > 100:
+                    print('# saved_invstd: {}'.format(
+                        (_maxabs1, _maxabs2, _maxabs3)))
+
         return y,
 
     def fw_scale_bias_relu_conv_bnorm(self, lid, x, W, gamma, beta,
