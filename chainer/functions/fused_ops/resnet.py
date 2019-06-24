@@ -111,9 +111,9 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
             2, x2, W2, gamma2, beta2, scale2, bias2)
         if x4 is not None:
             # print('# x.shape: {}'.format(x4.shape))
-            y = self.fw_scale_bias_add_relu(x3, scale3, bias3, x4)
+            y, y_bitmask = self.fw_scale_bias_add_relu(x3, scale3, bias3, x4)
         else:
-            y = self.fw_scale_bias_add_relu(x3, scale3, bias3, x0)
+            y, y_bitmask = self.fw_scale_bias_add_relu(x3, scale3, bias3, x0)
 
         if configuration.config.train:
             self.x1 = x1
@@ -127,6 +127,7 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
             self.bias3 = bias3
             self.saved_mean = (mean1, mean2, mean3)
             self.saved_invstd = (invstd1, invstd2, invstd3)
+            self.y_bitmask = y_bitmask
             self.retain_outputs((0,))
             if False:  # debug
                 _maxabs1 = cupy.max(cupy.abs(invstd1))
@@ -357,11 +358,17 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
         if self.reference:
             z = x * scale + bias + y
             z[z <= 0] = 0
+            z_bitmask = None
         else:
             _n, _h, _w, _c = x.shape
             z = cupy.empty_like(x)
-            block_size = 256
-            n_blocks = _get_num_SM(x.data.device_id) * 4
+            block_size = 1024
+            n_blocks = _get_num_SM(x.data.device_id)
+
+            n_threads = block_size * n_blocks
+            n_elems = (z.size + (32 - 1)) // 32
+            n_elems = n_elems + (n_threads - 1)
+            z_bitmask = cupy.empty((n_elems,), dtype=cupy.uint32)
             # self._fw_scale_bias_add_relu()(
             #     (n_blocks,), (block_size,),
             #     (x, scale, bias, y,
@@ -370,9 +377,9 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
             self._fw_scale_bias_add_relu_vec4()(
                 (n_blocks,), (block_size,),
                 (x, scale, bias, y,
-                 z,
+                 z, z_bitmask,
                  _n, _h, _w, _c // 4))
-        return z
+        return z, z_bitmask
 
     def _fw_scale_bias_add_relu(self):
         return cupy.RawKernel(r'''
@@ -422,7 +429,7 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
     void cupy_resnet_fw_SBAR_vec4(
         const ushort4 *x, const ushort4 *scale, const ushort4 *bias,
         const ushort4 *y,
-        ushort4 *z,
+        ushort4 *z, unsigned int *z_bitmask,
         int _n, int _h, int _w, int _c)
     {
         int tid = threadIdx.x + blockDim.x * blockIdx.x;
@@ -431,6 +438,10 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
         ushort4 bias_c;
         ushort4 scale_c;
         int pre_c = -1;
+        int j0 = 0;
+        int j1 = 0;
+        unsigned int bitmask = 0;
+        unsigned int mask = 1;
         for (int i = tid; i < num_elements; i += num_threads) {
             int c = i % _c;
             if (pre_c != c) {
@@ -445,16 +456,31 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
             _z.y = _XSBY(x_i.y, scale_c.y, bias_c.y, y_i.y);
             _z.z = _XSBY(x_i.z, scale_c.z, bias_c.z, y_i.z);
             _z.w = _XSBY(x_i.w, scale_c.w, bias_c.w, y_i.w);
-            if (_z.x <= 0) _z.x = 0.0;
-            if (_z.y <= 0) _z.y = 0.0;
-            if (_z.z <= 0) _z.z = 0.0;
-            if (_z.w <= 0) _z.w = 0.0;
+            if (_z.x <= 0) { _z.x = 0.0; } else { bitmask |= mask; }
+            mask <<= 1;
+            if (_z.y <= 0) { _z.y = 0.0; } else { bitmask |= mask; }
+            mask <<= 1;
+            if (_z.z <= 0) { _z.z = 0.0; } else { bitmask |= mask; }
+            mask <<= 1;
+            if (_z.w <= 0) { _z.w = 0.0; } else { bitmask |= mask; }
+            mask <<= 1;
             ushort4 z_i;
             _FLOAT_TO_US(z_i.x, _z.x);
             _FLOAT_TO_US(z_i.y, _z.y);
             _FLOAT_TO_US(z_i.z, _z.z);
             _FLOAT_TO_US(z_i.w, _z.w);
             z[i] = z_i;
+
+            j0 += 4;
+            if (j0 >= 32) {
+                z_bitmask[tid + j1 * num_threads] = bitmask;
+                bitmask = 0;
+                j0 = 0;
+                j1++;
+            }
+        }
+        if (j0 > 0) {
+            z_bitmask[tid + j1 * num_threads] = bitmask;
         }
     }
     ''', 'cupy_resnet_fw_SBAR_vec4')
@@ -482,7 +508,7 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
         gy = cuda.cupy.ascontiguousarray(gy.data)
 
         gx3, g_gamma2, g_beta2, gx4 = self.bw_scale_bias_add_relu(
-            self.x3, self.scale3, self.bias3, y, gy)
+            self.x3, self.scale3, self.bias3, y, self.y_bitmask, gy)
 
         ret = self.bw_scale_bias_relu_conv_bnorm(
             2,
@@ -537,7 +563,7 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
             ret = ret + (gx4,)
         return ret
         
-    def bw_scale_bias_add_relu(self, x, scale, bias, z, gz):
+    def bw_scale_bias_add_relu(self, x, scale, bias, z, z_bitmask, gz):
         '''
         z = x * scale + bias + y
         '''
@@ -565,7 +591,7 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
             #      _n, _h, _w, _c // 2))
             self._bw_scale_bias_add_relu_vec4()(
                 (n_blocks,), (block_size,),
-                (x, scale, bias, z, gz, self.saved_invstd[2],
+                (x, scale, bias, z_bitmask, gz, self.saved_invstd[2],
                  gx, g_gamma, g_beta, gy,
                  _n, _h, _w, _c // 4))
 
@@ -661,7 +687,8 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
     extern "C" __global__
     void cupy_resnet_bw_SBAR_gX_gGamma_vec4(
         const ushort4 *x, const ushort4 *scale, const ushort4 *bias,
-        const ushort4 *z, const ushort4 *gz, const float4 *invstd,
+        unsigned int *z_bitmask, const ushort4 *gz,
+        const float4 *invstd,
         ushort4 *gx, float4 *g_gamma, float4 *g_beta, ushort4 *gy,
         int _n, int _h, int _w, int _c)
     {
@@ -682,23 +709,32 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
         float4  my_g_beta;
         float4  my_g_gamma;
         ushort4  scale_c;
+        int j0 = 32;
+        int j1 = 0;
+        unsigned int bitmask;
+        unsigned int mask;
         for (int i = tid; i < num_elements; i += num_threads) {
-            ushort4 z_i = z[i];
-            float4 _z_i;
-            _z_i.x = (float)_US_TO_HALF(z_i.x);
-            _z_i.y = (float)_US_TO_HALF(z_i.y);
-            _z_i.z = (float)_US_TO_HALF(z_i.z);
-            _z_i.w = (float)_US_TO_HALF(z_i.w);
             ushort4 gz_i = gz[i];
             float4 _gz_i;
             _gz_i.x = (float)_US_TO_HALF(gz_i.x);
             _gz_i.y = (float)_US_TO_HALF(gz_i.y);
             _gz_i.z = (float)_US_TO_HALF(gz_i.z);
             _gz_i.w = (float)_US_TO_HALF(gz_i.w);
-            if (_z_i.x <= 0.0) _gz_i.x = 0.0;
-            if (_z_i.y <= 0.0) _gz_i.y = 0.0;
-            if (_z_i.z <= 0.0) _gz_i.z = 0.0;
-            if (_z_i.w <= 0.0) _gz_i.w = 0.0;
+            if (j0 >= 32) {
+                bitmask = z_bitmask[tid + j1 * num_threads];
+                mask = 1;
+                j0 = 0;
+                j1++;
+            }
+            if ((bitmask && mask) == 0) _gz_i.x = 0.0;
+            mask <<= 1;
+            if ((bitmask && mask) == 0) _gz_i.y = 0.0;
+            mask <<= 1;
+            if ((bitmask && mask) == 0) _gz_i.z = 0.0;
+            mask <<= 1;
+            if ((bitmask && mask) == 0) _gz_i.w = 0.0;
+            mask <<= 1;
+            j0 += 4;
             int cur_c = i % _c;
             if (pre_c != cur_c) {
                 if (pre_c >= 0) {
