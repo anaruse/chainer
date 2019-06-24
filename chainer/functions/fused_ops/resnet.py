@@ -448,18 +448,21 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
         del gx2
         self.x2 = None
 
+        if self.len_inputs == 10:
+            gx0 = gx4
+            gx4 = None
+        else:
+            gx0 = None
+
         ret = self.bw_scale_bias_relu_conv_bnorm(
             0,
             x0, None, None, W0,
             self.x1, self.scale1, self.bias1,
-            gx1, g_gamma0, g_beta0)
+            gx1, g_gamma0, g_beta0,
+            gx0)
         gx0, _, _, gW0 = ret
         del gx1
         self.x1 = None
-
-        if self.len_inputs == 10:
-            gx0 = gx0 + gx4
-            gx4 = None
 
         gx0 = chainer.Variable(gx0)
         gW0 = chainer.Variable(gW0)
@@ -593,7 +596,8 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
     def bw_scale_bias_relu_conv_bnorm(self, lid,
                                       x, i_scale, i_bias, W,
                                       y, o_scale, o_bias,
-                                      gy, g_gamma, g_beta):
+                                      gy, g_gamma, g_beta,
+                                      gx=None):
         '''
         y = conv(relu(x * i_scale + i_bias), W)
         o_scale, o_bias = f(y, gamma, beta)
@@ -691,10 +695,25 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
         del workspace
 
         # compute gx
-        gx = chainer.functions.deconvolution_2d(
-            gy, W, stride=self.stride[lid], pad=self.pad[lid],
-            outsize=(x_h, x_w),
-            tensor_layout=self.tensor_layout).data
+        if gx is None:
+            gx = cupy.empty_like(x)
+            conv_beta = 0.0
+        else:
+            conv_beta = 1.0
+        pad = (self.pad[lid], self.pad[lid])
+        stride = (self.stride[lid], self.stride[lid])
+        dilation = (1, 1)
+        groups = 1
+        deterministic = configuration.config.cudnn_deterministic
+        auto_tune = configuration.config.autotune
+        tensor_core = configuration.config.use_cudnn_tensor_core
+        cudnn_tensor_layout = utils.get_cudnn_tensor_layout(self.tensor_layout)
+        cuda.cudnn.convolution_backward_data(
+            W, gy, None, gx, pad, stride, dilation, groups,
+            deterministic=deterministic, auto_tune=auto_tune,
+            tensor_core=tensor_core,
+            d_layout=cudnn_tensor_layout, w_layout=cudnn_tensor_layout,
+            beta=conv_beta)
 
         # compute gx, gi_scale and gi_bias
         if i_scale is None:
