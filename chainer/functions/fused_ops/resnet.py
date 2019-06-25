@@ -110,7 +110,6 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
         x3, scale3, bias3, mean3, invstd3 = self.fw_scale_bias_relu_conv_bnorm(
             2, x2, W2, gamma2, beta2, scale2, bias2)
         if x4 is not None:
-            # print('# x.shape: {}'.format(x4.shape))
             y, y_bitmask = self.fw_scale_bias_add_relu(x3, scale3, bias3, x4)
         else:
             y, y_bitmask = self.fw_scale_bias_add_relu(x3, scale3, bias3, x0)
@@ -369,11 +368,6 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
             n_elems = (z.size + (32 - 1)) // 32
             n_elems = n_elems + (n_threads - 1)
             z_bitmask = cupy.empty((n_elems,), dtype=cupy.uint32)
-            # self._fw_scale_bias_add_relu()(
-            #     (n_blocks,), (block_size,),
-            #     (x, scale, bias, y,
-            #      z,
-            #      _n, _h, _w, _c // 2))
             self._fw_scale_bias_add_relu_vec4()(
                 (n_blocks,), (block_size,),
                 (x, scale, bias, y,
@@ -381,43 +375,6 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
                  _n, _h, _w, _c // 4))
         return z, z_bitmask
 
-    def _fw_scale_bias_add_relu(self):
-        return cupy.RawKernel(r'''
-#include <cuda_fp16.h>
-    extern "C" __global__
-    void cupy_resnet_fw_SBAR(
-        const half2 *x, const half2 *scale, const half2 *bias, const half2 *y,
-        half2 *z,
-        int _n, int _h, int _w, int _c)
-    {
-        int tid = threadIdx.x + blockDim.x * blockIdx.x;
-        int num_threads = blockDim.x * gridDim.x;
-        int num_elements = _n * _h * _w * _c;
-        half2 bias_c;
-        half2 scale_c;
-        int pre_c = -1;
-        for (int i = tid; i < num_elements; i += num_threads) {
-            int c = i % _c;
-            if (pre_c != c) {
-                bias_c = bias[c];
-                scale_c = scale[c];
-            }
-            pre_c = c;
-            half2 x_i = x[i];
-            half2 y_i = y[i];
-            float2 _z;
-            _z.x = (float)x_i.x * (float)scale_c.x + (float)bias_c.x + (float)y_i.x;
-            _z.y = (float)x_i.y * (float)scale_c.y + (float)bias_c.y + (float)y_i.y;
-            if (_z.x <= 0) _z.x = 0.0;
-            if (_z.y <= 0) _z.y = 0.0;
-            half2 z_i;
-            z_i.x = (half)_z.x;
-            z_i.y = (half)_z.y;
-            z[i] = z_i;
-        }
-    }
-    ''', 'cupy_resnet_fw_SBAR')
-    
     def _fw_scale_bias_add_relu_vec4(self):
         return cupy.RawKernel(r'''
 #include <cuda_fp16.h>
@@ -584,11 +541,6 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
             block_size = 1024
             n_blocks = _get_num_SM(x.data.device_id)
             assert _c <= 2048
-            # self._bw_scale_bias_add_relu()(
-            #     (n_blocks,), (block_size,),
-            #     (x, scale, bias, z, gz, self.saved_invstd[2],
-            #      gx, g_gamma, g_beta, gy,
-            #      _n, _h, _w, _c // 2))
             self._bw_scale_bias_add_relu_vec4()(
                 (n_blocks,), (block_size,),
                 (x, scale, bias, z_bitmask, gz, self.saved_invstd[2],
@@ -597,87 +549,6 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
 
         return gx, g_gamma, g_beta, gy
 
-    def _bw_scale_bias_add_relu(self):
-        return cupy.RawKernel(r'''
-#include <cuda_fp16.h>
-    extern "C" __global__
-    void cupy_resnet_bw_SBAR_gX_gGamma(
-        const half2 *x, const half2 *scale, const half2 *bias,
-        const half2 *z, const half2 *gz, const float2 *invstd,
-        half2 *gx, float2 *g_gamma, float2 *g_beta, half2 *gy,
-        int _n, int _h, int _w, int _c)
-    {
-        __shared__ float2 sm_g_beta[1024];
-        __shared__ float2 sm_g_gamma[1024];
-        for (int i = threadIdx.x; i < _c; i += blockDim.x) {
-            sm_g_beta[i].x = 0.0;
-            sm_g_beta[i].y = 0.0;
-            sm_g_gamma[i].x = 0.0;
-            sm_g_gamma[i].y = 0.0;
-        }
-        __syncthreads();
-
-        int tid = threadIdx.x + blockDim.x * blockIdx.x;
-        int num_threads = blockDim.x * gridDim.x;
-        int num_elements = _n * _h * _w * _c;
-        int pre_c = -1;
-        float2  my_g_beta;
-        float2  my_g_gamma;
-        float2  scale_c;
-        for (int i = tid; i < num_elements; i += num_threads) {
-            float2 x_i = {(float)x[i].x, (float)x[i].y};
-            float2 z_i = {(float)z[i].x, (float)z[i].y};
-            float2 gz_i = {(float)gz[i].x, (float)gz[i].y};
-            if (z_i.x <= 0.0) gz_i.x = 0.0;
-            if (z_i.y <= 0.0) gz_i.y = 0.0;
-            int cur_c = i % _c;
-            if (pre_c != cur_c) {
-                if (pre_c >= 0) {
-                    atomicAdd(&sm_g_beta[pre_c].x,  my_g_beta.x);
-                    atomicAdd(&sm_g_beta[pre_c].y,  my_g_beta.y);
-                    atomicAdd(&sm_g_gamma[pre_c].x, my_g_gamma.x);
-                    atomicAdd(&sm_g_gamma[pre_c].y, my_g_gamma.y);
-                }
-                pre_c = cur_c;
-                scale_c.x = (float)scale[cur_c].x;
-                scale_c.y = (float)scale[cur_c].y;
-                my_g_beta.x  = gz_i.x;
-                my_g_beta.y  = gz_i.y;
-                my_g_gamma.x = gz_i.x * x_i.x;
-                my_g_gamma.y = gz_i.y * x_i.y;
-            }
-            else {
-                my_g_beta.x  += gz_i.x;
-                my_g_beta.y  += gz_i.y;
-                my_g_gamma.x += gz_i.x * x_i.x;
-                my_g_gamma.y += gz_i.y * x_i.y;
-            }
-            half2 gx_i;
-            gx_i.x = (half)(gz_i.x * scale_c.x);
-            gx_i.y = (half)(gz_i.y * scale_c.y);
-            gx[i] = gx_i;
-            half2 gy_i;
-            gy_i.x = (half)gz_i.x;
-            gy_i.y = (half)gz_i.y;
-            gy[i] = gy_i;
-        }
-        if (pre_c >= 0) {
-            atomicAdd(&sm_g_beta[pre_c].x,  my_g_beta.x);
-            atomicAdd(&sm_g_beta[pre_c].y,  my_g_beta.y);
-            atomicAdd(&sm_g_gamma[pre_c].x, my_g_gamma.x);
-            atomicAdd(&sm_g_gamma[pre_c].y, my_g_gamma.y);
-        }
-
-        __syncthreads();
-        for (int i = threadIdx.x; i < _c; i += blockDim.x) {
-            atomicAdd(&g_beta[i].x, sm_g_beta[i].x);
-            atomicAdd(&g_beta[i].y, sm_g_beta[i].y);
-            atomicAdd(&g_gamma[i].x, sm_g_gamma[i].x * invstd[i].x);
-            atomicAdd(&g_gamma[i].y, sm_g_gamma[i].y * invstd[i].y);
-        }
-    }
-    ''', 'cupy_resnet_bw_SBAR_gX_gGamma')
-    
     def _bw_scale_bias_add_relu_vec4(self):
         return cupy.RawKernel(r'''
 #include <cuda_fp16.h>
@@ -834,12 +705,6 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
             _n, _h, _w, _c = y.shape
             block_size = 1024
             n_blocks = _get_num_SM(y.data.device_id)
-            # self._bw_scale_bias_relu_conv_bnorm_gY()(
-            #     (n_blocks,), (block_size,),
-            #     (y, g_gamma, g_beta,
-            #      self.saved_mean[lid], self.saved_invstd[lid],
-            #      gy,
-            #      _n, _h, _w, _c // 2))
             self._bw_scale_bias_relu_conv_bnorm_gY_vec4()(
                 (n_blocks,), (block_size,),
                 (y, g_gamma, g_beta,
@@ -955,11 +820,6 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
                 block_size = 1024
                 n_blocks = _get_num_SM(x.data.device_id)
                 assert _c <= 2048
-                # self._bw_scale_bias_relu_conv_bnorm_gX_gScale_gBias()(
-                #     (n_blocks,), (block_size,),
-                #     (x, i_scale, i_bias, self.saved_invstd[lid-1],
-                #      gx, g_gamma, g_beta,
-                #      _n, _h, _w, _c // 2))
                 self._bw_scale_bias_relu_conv_bnorm_gX_gGamma_vec4()(
                     (n_blocks,), (block_size,),
                     (x, i_scale, i_bias, self.saved_invstd[lid-1],
@@ -967,50 +827,6 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
                      _n, _h, _w, _c // 4))
 
         return gx, g_gamma, g_beta, gW
-
-    def _bw_scale_bias_relu_conv_bnorm_gY(self):
-        return cupy.RawKernel(r'''
-#include <cuda_fp16.h>
-    extern "C" __global__
-    void cupy_resnet_bw_SBRCB_gY(
-        const half2 *y, const float2 *g_gamma, const float2 *g_beta,
-        const float2 *mean, const float2 *invstd,
-        half2 *gy,
-        int _n, int _h, int _w, int _c)
-    {
-        int tid = threadIdx.x + blockDim.x * blockIdx.x;
-        int num_threads = blockDim.x * gridDim.x;
-        int num_elements = _n * _h * _w * _c;
-        float2 mean_c;
-        float2 invstd_c;
-        float2 g_beta_c;
-        float2 g_gamma_c;
-        int pre_c = -1;
-        for (int i = tid; i < num_elements; i += num_threads) {
-            int c = i % _c;
-            if (pre_c != c) {
-                mean_c = mean[c];
-                invstd_c = invstd[c];
-                g_beta_c = g_beta[c];
-                g_gamma_c = g_gamma[c];
-            }
-            pre_c = c;
-            half2 y_i = y[i];
-            half2 gy_i = gy[i];
-            float2 _y;
-            _y.x = ((float)y_i.x - mean_c.x) * invstd_c.x;
-            _y.y = ((float)y_i.y - mean_c.y) * invstd_c.y;
-            float2 _gy;
-            _gy.x = (float)gy_i.x;
-            _gy.y = (float)gy_i.y;
-            _gy.x -= (g_beta_c.x + g_gamma_c.x * _y.x) / (_n * _h * _w);
-            _gy.y -= (g_beta_c.y + g_gamma_c.y * _y.y) / (_n * _h * _w);
-            gy_i.x = (half)_gy.x;
-            gy_i.y = (half)_gy.y;
-            gy[i] = gy_i;
-        }
-    }
-        ''', 'cupy_resnet_bw_SBRCB_gY')
 
     def _bw_scale_bias_relu_conv_bnorm_gY_vec4(self):
         return cupy.RawKernel(r'''
@@ -1065,84 +881,6 @@ class ResNetBottleNeckFunction(function_node.FunctionNode):
         }
     }
         ''', 'cupy_resnet_bw_SBRCB_gY_vec4')
-
-    def _bw_scale_bias_relu_conv_bnorm_gX_gScale_gBias(self):
-        return cupy.RawKernel(r'''
-#include <cuda_fp16.h>
-    extern "C" __global__
-    void cupy_resnet_bw_SBRCB_gX_gGamma(
-        const half2 *x, const half2 *scale, const half2 *bias,
-        const float2 *invstd,
-        half2 *gx, float2 *g_gamma, float2 *g_beta,
-        int _n, int _h, int _w, int _c)
-    {
-        __shared__ float2 sm_g_beta[1024];
-        __shared__ float2 sm_g_gamma[1024];
-        for (int i = threadIdx.x; i < _c; i += blockDim.x) {
-            sm_g_beta[i].x = 0.0;
-            sm_g_beta[i].y = 0.0;
-            sm_g_gamma[i].x = 0.0;
-            sm_g_gamma[i].y = 0.0;
-        }
-        __syncthreads();
-
-        int tid = threadIdx.x + blockDim.x * blockIdx.x;
-        int num_threads = blockDim.x * gridDim.x;
-        int num_elements = _n * _h * _w * _c;
-        int pre_c = -1;
-        float2  my_g_beta;
-        float2  my_g_gamma;
-        half2  my_scale;
-        half2  my_bias;
-        for (int i = tid; i < num_elements; i += num_threads) {
-            int cur_c = i % _c;
-            if (pre_c != cur_c) {
-                if (pre_c >= 0) {
-                    atomicAdd(&sm_g_beta[pre_c].x,  my_g_beta.x);
-                    atomicAdd(&sm_g_beta[pre_c].y,  my_g_beta.y);
-                    atomicAdd(&sm_g_gamma[pre_c].x, my_g_gamma.x);
-                    atomicAdd(&sm_g_gamma[pre_c].y, my_g_gamma.y);
-                }
-                my_g_beta.x  = 0.0;
-                my_g_beta.y  = 0.0;
-                my_g_gamma.x = 0.0;
-                my_g_gamma.y = 0.0;
-                my_scale = scale[cur_c];
-                my_bias  = bias[cur_c];
-            }
-            pre_c = cur_c;
-            half2 x_i = x[i];
-            half2 gx_i = gx[i];
-            float2 _x;
-            _x.x = (float)my_scale.x * (float)x_i.x + (float)my_bias.x;
-            _x.y = (float)my_scale.y * (float)x_i.y + (float)my_bias.y;
-            float2 _gx = {(float)gx_i.x, (float)gx_i.y};
-            if (_x.x <= 0.0) _gx.x = 0.0;
-            if (_x.y <= 0.0) _gx.y = 0.0;
-            my_g_beta.x  += _gx.x;
-            my_g_beta.y  += _gx.y;
-            my_g_gamma.x += _gx.x * _x.x;
-            my_g_gamma.y += _gx.y * _x.y;
-            gx_i.x = (half)(_gx.x * (float)my_scale.x);
-            gx_i.y = (half)(_gx.y * (float)my_scale.y);
-            gx[i] = gx_i;
-        }
-        if (pre_c >= 0) {
-            atomicAdd(&sm_g_beta[pre_c].x,  my_g_beta.x);
-            atomicAdd(&sm_g_beta[pre_c].y,  my_g_beta.y);
-            atomicAdd(&sm_g_gamma[pre_c].x, my_g_gamma.x);
-            atomicAdd(&sm_g_gamma[pre_c].y, my_g_gamma.y);
-        }
-
-        __syncthreads();
-        for (int i = threadIdx.x; i < _c; i += blockDim.x) {
-            atomicAdd(&g_beta[i].x, sm_g_beta[i].x);
-            atomicAdd(&g_beta[i].y, sm_g_beta[i].y);
-            atomicAdd(&g_gamma[i].x, sm_g_gamma[i].x * invstd[i].x);
-            atomicAdd(&g_gamma[i].y, sm_g_gamma[i].y * invstd[i].y);
-        }
-    }
-    ''', 'cupy_resnet_bw_SBRCB_gX_gGamma')
 
     def _bw_scale_bias_relu_conv_bnorm_gX_gGamma_vec4(self):
         return cupy.RawKernel(r'''
