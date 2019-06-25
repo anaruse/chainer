@@ -7,6 +7,11 @@ import chainer.functions as F
 from chainer import initializers
 import chainer.links as L
 
+# import cupy
+
+_bn_eps = 2.5e-5
+_bn_eps = 1e-4
+
 
 class BottleNeckA(chainer.Chain):
 
@@ -20,7 +25,7 @@ class BottleNeckA(chainer.Chain):
                 initialW=initialW, nobias=True)
             self.bn4 = L.BatchNormalization(out_size)
             self.resnet_bottle_neck = L.ResNetBottleNeck(
-                ch=(in_size, ch, out_size), stride=stride)
+                ch=(in_size, ch, out_size), stride=stride, bn_eps=_bn_eps)
 
     def forward(self, x):
         h = self.bn4(self.conv4(x))
@@ -34,7 +39,7 @@ class BottleNeckB(chainer.Chain):
         super(BottleNeckB, self).__init__()
         with self.init_scope():
             self.resnet_bottle_neck = L.ResNetBottleNeck(
-                ch=(in_size, ch, in_size))
+                ch=(in_size, ch, in_size), bn_eps=_bn_eps)
 
     def forward(self, x):
         y = self.resnet_bottle_neck(x)
@@ -63,7 +68,8 @@ class ResNet50(chainer.Chain):
         super(ResNet50, self).__init__()
         with self.init_scope():
             self.conv1 = L.Convolution2D(
-                3, 64, 7, 2, 3, initialW=initializers.HeNormal())
+                3, 64, 7, 2, 3, initialW=initializers.HeNormal(),
+                nobias=True)
             self.bn1 = L.BatchNormalization(64)
             self.res2 = Block(3, 64, 64, 256, 1)
             self.res3 = Block(4, 256, 128, 512)
@@ -72,9 +78,9 @@ class ResNet50(chainer.Chain):
             self.fc = L.Linear(2048, 1000)
 
     def forward(self, x, t):
-        h = self.bn1(self.conv1(x))
         with using_config('tensor_layout', 'NHWC'):
-            h = F.transpose_to_NHWC(h)
+            h = F.transpose_to_NHWC(x)
+            h = self.bn1(self.conv1(h))
             h = F.max_pooling_2d(F.relu(h), 3, stride=2)
             h = self.res2(h)
             h = self.res3(h)
